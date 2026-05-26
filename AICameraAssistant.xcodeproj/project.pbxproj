@@ -6,6 +6,13 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		FE30198E2FC382CA00E6BEBB /* FirebaseAnalytics in Frameworks */ = {isa = PBXBuildFile; productRef = FE30198D2FC382CA00E6BEBB /* FirebaseAnalytics */; };
+		FE3019912FC3834300E6BEBB /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = FE3019902FC3834300E6BEBB /* FirebaseCore */; };
+		FE3019932FC3834C00E6BEBB /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = FE3019922FC3834C00E6BEBB /* FirebaseFirestore */; };
+		FE3019962FC3C4DA00E6BEBB /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = FE3019952FC3C4DA00E6BEBB /* WebRTC */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		FE5B7D4F2FC2AE8C00105CEC /* AICameraAssistant.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AICameraAssistant.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -23,17 +30,61 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FE3019912FC3834300E6BEBB /* FirebaseCore in Frameworks */,
+				FE3019962FC3C4DA00E6BEBB /* WebRTC in Frameworks */,
+				FE30198E2FC382CA00E6BEBB /* FirebaseAnalytics in Frameworks */,
+				FE3019932FC3834C00E6BEBB /* FirebaseFirestore in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		FE3019772FC2CC6600E6BEBB /* Models */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Models;
+			sourceTree = "<group>";
+		};
+		FE3019782FC2CC6B00E6BEBB /* Services */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Services;
+			sourceTree = "<group>";
+		};
+		FE3019792FC2CC6B00E6BEBB /* Screens */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Screens;
+			sourceTree = "<group>";
+		};
+		FE30197A2FC2CC6B00E6BEBB /* Camera */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = Camera;
+			sourceTree = "<group>";
+		};
+		FE30198F2FC3834300E6BEBB /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		FE5B7D462FC2AE8C00105CEC = {
 			isa = PBXGroup;
 			children = (
 				FE5B7D512FC2AE8C00105CEC /* AICameraAssistant */,
 				FE5B7D502FC2AE8C00105CEC /* Products */,
+				FE3019772FC2CC6600E6BEBB /* Models */,
+				FE3019782FC2CC6B00E6BEBB /* Services */,
+				FE3019792FC2CC6B00E6BEBB /* Screens */,
+				FE30197A2FC2CC6B00E6BEBB /* Camera */,
+				FE30198F2FC3834300E6BEBB /* Frameworks */,
 			);
 			sourceTree = "<group>";
 		};
@@ -65,6 +116,10 @@
 			);
 			name = AICameraAssistant;
 			packageProductDependencies = (
+				FE30198D2FC382CA00E6BEBB /* FirebaseAnalytics */,
+				FE3019902FC3834300E6BEBB /* FirebaseCore */,
+				FE3019922FC3834C00E6BEBB /* FirebaseFirestore */,
+				FE3019952FC3C4DA00E6BEBB /* WebRTC */,
 			);
 			productName = AICameraAssistant;
 			productReference = FE5B7D4F2FC2AE8C00105CEC /* AICameraAssistant.app */;
@@ -94,6 +149,10 @@
 			);
 			mainGroup = FE5B7D462FC2AE8C00105CEC;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				FE30198C2FC382CA00E6BEBB /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
+				FE3019942FC3C4DA00E6BEBB /* XCRemoteSwiftPackageReference "WebRTC" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = FE5B7D502FC2AE8C00105CEC /* Products */;
 			projectDirPath = "";
@@ -251,13 +310,17 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = PAT3YRN69G;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "AICameraAssistant needs camera access to host the remote camera preview and capture photos.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Save captured photos to your photo library";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -282,13 +345,17 @@
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = PAT3YRN69G;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_NSCameraUsageDescription = "AICameraAssistant needs camera access to host the remote camera preview and capture photos.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Save captured photos to your photo library";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.6;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -328,6 +395,48 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		FE30198C2FC382CA00E6BEBB /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/firebase/firebase-ios-sdk";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 12.13.0;
+			};
+		};
+		FE3019942FC3C4DA00E6BEBB /* XCRemoteSwiftPackageReference "WebRTC" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/stasel/WebRTC";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 147.0.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		FE30198D2FC382CA00E6BEBB /* FirebaseAnalytics */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = FE30198C2FC382CA00E6BEBB /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAnalytics;
+		};
+		FE3019902FC3834300E6BEBB /* FirebaseCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = FE30198C2FC382CA00E6BEBB /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseCore;
+		};
+		FE3019922FC3834C00E6BEBB /* FirebaseFirestore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = FE30198C2FC382CA00E6BEBB /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseFirestore;
+		};
+		FE3019952FC3C4DA00E6BEBB /* WebRTC */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = FE3019942FC3C4DA00E6BEBB /* XCRemoteSwiftPackageReference "WebRTC" */;
+			productName = WebRTC;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = FE5B7D472FC2AE8C00105CEC /* Project object */;
 }
