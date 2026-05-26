@@ -1,10 +1,3 @@
-//
-//  AICameraAssistantApp.swift
-//  AICameraAssistant
-//
-//  Created by Jesy Multani on 2026-05-23.
-//
-
 import SwiftUI
 
 @main
