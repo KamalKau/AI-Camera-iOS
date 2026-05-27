@@ -2071,11 +2071,11 @@ struct ContentView: View {
                 .navigationDestination(for: AppRoute.self) { route in
                     switch route {
                     case .cameraHost(let roomCode):
-                        CameraHostScreen(roomCode: roomCode)
+                        CameraHostScreen(roomCode: roomCode, path: $path)
                     case .controllerEntry:
                         ControllerEntryScreen(path: $path)
                     case .waitingForApproval(let roomCode):
-                        WaitingForApprovalScreen(roomCode: roomCode)
+                        WaitingForApprovalScreen(roomCode: roomCode, path: $path)
                     }
                 }
         }
@@ -2191,6 +2191,7 @@ struct ControllerEntryScreen: View {
 
 struct CameraHostScreen: View {
     let roomCode: String
+    @Binding var path: NavigationPath
 
     @EnvironmentObject private var services: AppServices
     @StateObject private var camera = CameraController()
@@ -2386,8 +2387,7 @@ struct CameraHostScreen: View {
             for try await nextRoom in await services.roomRepository.observeRoom(roomCode: roomCode) {
                 room = nextRoom
                 if nextRoom.status == .ended {
-                    services.webRtcSession.stop()
-                    camera.stop()
+                    returnToStart()
                     continue
                 }
                 if nextRoom.status == .denied {
@@ -2502,12 +2502,17 @@ struct CameraHostScreen: View {
         Task {
             do {
                 try await services.roomRepository.endSession(roomCode: roomCode)
-                services.webRtcSession.stop()
-                camera.stop()
+                returnToStart()
             } catch {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func returnToStart() {
+        services.webRtcSession.stop()
+        camera.stop()
+        path = NavigationPath()
     }
 
     private func publishCurrentControls() {
@@ -2527,6 +2532,7 @@ struct CameraHostScreen: View {
 
 struct WaitingForApprovalScreen: View {
     let roomCode: String
+    @Binding var path: NavigationPath
 
     @EnvironmentObject private var services: AppServices
     @State private var room: RoomDocument?
@@ -2826,7 +2832,11 @@ struct WaitingForApprovalScreen: View {
         do {
             for try await nextRoom in await services.roomRepository.observeRoom(roomCode: roomCode) {
                 room = nextRoom
-                if nextRoom.status == .ended || nextRoom.status == .denied {
+                if nextRoom.status == .ended {
+                    returnToStart()
+                    continue
+                }
+                if nextRoom.status == .denied {
                     cancelFirstFrameRetry()
                     services.webRtcSession.stop()
                     continue
@@ -2941,12 +2951,17 @@ struct WaitingForApprovalScreen: View {
         Task {
             do {
                 try await services.roomRepository.endSession(roomCode: roomCode)
-                cancelFirstFrameRetry()
-                services.webRtcSession.stop()
+                returnToStart()
             } catch {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+
+    private func returnToStart() {
+        cancelFirstFrameRetry()
+        services.webRtcSession.stop()
+        path = NavigationPath()
     }
 
     private func updateGridEnabled(_ enabled: Bool) {
