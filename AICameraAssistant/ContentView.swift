@@ -97,10 +97,6 @@ actor LocalRoomRepository: RoomRepository {
         try update(roomCode: roomCode) { $0.exposureIndex = min(8, max(-8, exposureIndex)) }
     }
 
-    func updateStreamQualityMode(roomCode: String, mode: StreamQualityMode) async throws {
-        try update(roomCode: roomCode) { $0.streamQualityMode = mode }
-    }
-
     func requestCapture(roomCode: String) async throws {
         try update(roomCode: roomCode) { $0.captureRequest = .new() }
     }
@@ -278,10 +274,6 @@ actor FirestoreRoomRepository: RoomRepository {
 
     func updateExposureIndex(roomCode: String, exposureIndex: Int) async throws {
         try await update(roomCode: roomCode, values: ["exposureIndex": min(8, max(-8, exposureIndex))])
-    }
-
-    func updateStreamQualityMode(roomCode: String, mode: StreamQualityMode) async throws {
-        try await update(roomCode: roomCode, values: ["streamQualityMode": mode.rawValue])
     }
 
     func requestCapture(roomCode: String) async throws {
@@ -839,10 +831,6 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
 
     func updateExposureIndex(roomCode: String, exposureIndex: Int) async throws {
         try await update(roomCode: roomCode, values: ["exposureIndex": min(8, max(-8, exposureIndex))])
-    }
-
-    func updateStreamQualityMode(roomCode: String, mode: StreamQualityMode) async throws {
-        try await update(roomCode: roomCode, values: ["streamQualityMode": mode.rawValue])
     }
 
     func requestCapture(roomCode: String) async throws {
@@ -2468,11 +2456,6 @@ struct CameraHostScreen: View {
     private func updateAspectRatioMode(_ mode: String) {
         Task { try? await services.roomRepository.updateAspectRatioMode(roomCode: roomCode, aspectRatioMode: mode) }
     }
-
-    private func updateStreamQualityMode(_ mode: StreamQualityMode) {
-        services.webRtcSession.applyStreamQualityMode(mode)
-        Task { try? await services.roomRepository.updateStreamQualityMode(roomCode: roomCode, mode: mode) }
-    }
 }
 
 struct WaitingForApprovalScreen: View {
@@ -2841,17 +2824,6 @@ struct WaitingForApprovalScreen: View {
         Task {
             do {
                 try await services.roomRepository.updateAspectRatioMode(roomCode: roomCode, aspectRatioMode: mode)
-            } catch {
-                errorMessage = error.localizedDescription
-            }
-        }
-    }
-
-    private func updateStreamQualityMode(_ mode: StreamQualityMode) {
-        services.webRtcSession.applyStreamQualityMode(mode)
-        Task {
-            do {
-                try await services.roomRepository.updateStreamQualityMode(roomCode: roomCode, mode: mode)
             } catch {
                 errorMessage = error.localizedDescription
             }

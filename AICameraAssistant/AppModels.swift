@@ -20,26 +20,10 @@ enum RoomStatus: String, Codable, Sendable {
     case ended
 }
 
-enum StreamQualityMode: String, CaseIterable, Codable, Sendable {
+enum StreamQualityMode: String, Codable, Sendable {
     case lowLatency = "low_latency"
     case balanced
     case quality
-
-    var label: String {
-        switch self {
-        case .lowLatency: return "Low Latency"
-        case .balanced: return "Balanced"
-        case .quality: return "Quality"
-        }
-    }
-
-    var next: StreamQualityMode {
-        switch self {
-        case .lowLatency: return .balanced
-        case .balanced: return .quality
-        case .quality: return .lowLatency
-        }
-    }
 }
 
 struct CaptureRequest: Codable, Equatable, Sendable {
@@ -157,7 +141,6 @@ protocol RoomRepository: Sendable {
     func updateAspectRatioMode(roomCode: String, aspectRatioMode: String) async throws
     func updateFocusRequest(roomCode: String, x: Double, y: Double, requestId: Int, lockEnabled: Bool) async throws
     func updateExposureIndex(roomCode: String, exposureIndex: Int) async throws
-    func updateStreamQualityMode(roomCode: String, mode: StreamQualityMode) async throws
     func requestCapture(roomCode: String) async throws
     func setOffer(_ sdp: String, roomCode: String, rtcSessionId: String) async throws
     func setAnswer(_ sdp: String, roomCode: String, rtcSessionId: String) async throws
