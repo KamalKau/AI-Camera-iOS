@@ -1210,8 +1210,17 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     }
 
     func startHost(roomCode: String, repository: any RoomRepository) async {
+        await startHost(roomCode: roomCode, repository: repository, preserveLocalCapture: false)
+    }
+
+    private func startHost(
+        roomCode: String,
+        repository: any RoomRepository,
+        preserveLocalCapture: Bool
+    ) async {
         #if canImport(WebRTC)
-        guard state == .idle || state == .unavailable || state == .failed else { return }
+        let canStart = state == .idle || state == .unavailable || state == .failed || (preserveLocalCapture && state == .connecting)
+        guard canStart else { return }
         state = .connecting
         self.role = .host
         self.roomCode = roomCode
@@ -1221,7 +1230,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         do {
             let peerConnection = try makePeerConnection()
             self.peerConnection = peerConnection
-            try startCameraTrack(on: peerConnection)
+            try attachCameraTrack(to: peerConnection, preserveLocalCapture: preserveLocalCapture)
             observeSignaling(roomCode: roomCode, repository: repository)
         } catch {
             state = .failed
@@ -1232,15 +1241,26 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     }
 
     func startController(roomCode: String, repository: any RoomRepository) async {
+        await startController(roomCode: roomCode, repository: repository, preserveRemotePreview: false)
+    }
+
+    private func startController(
+        roomCode: String,
+        repository: any RoomRepository,
+        preserveRemotePreview: Bool
+    ) async {
         #if canImport(WebRTC)
-        guard state == .idle || state == .unavailable || state == .failed else { return }
+        let canStart = state == .idle || state == .unavailable || state == .failed || (preserveRemotePreview && state == .connecting)
+        guard canStart else { return }
         state = .connecting
         self.role = .controller
         self.roomCode = roomCode
         self.repository = repository
         let rtcSessionId = UUID().uuidString
         self.rtcSessionId = rtcSessionId
-        self.remoteVideoTrack = nil
+        if !preserveRemotePreview {
+            self.remoteVideoTrack = nil
+        }
 
         do {
             let peerConnection = try makePeerConnection()
@@ -1250,6 +1270,9 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
             try await repository.setOffer(offer.sdp, roomCode: roomCode, rtcSessionId: rtcSessionId)
             observeSignaling(roomCode: roomCode, repository: repository)
         } catch {
+            if !preserveRemotePreview {
+                self.remoteVideoTrack = nil
+            }
             state = .failed
         }
         #else
@@ -1442,6 +1465,19 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
             throw WebRtcSessionError.peerConnectionUnavailable
         }
         return peerConnection
+    }
+
+    private func attachCameraTrack(to peerConnection: RTCPeerConnection, preserveLocalCapture: Bool) throws {
+        if preserveLocalCapture, let localVideoTrack, let cameraCapturer {
+            if let sender = peerConnection.add(localVideoTrack, streamIds: ["camera-stream"]) {
+                videoSender = sender
+                configureVideoSender(sender)
+            }
+            configureHostPhotoOutput(on: cameraCapturer)
+            return
+        }
+
+        try startCameraTrack(on: peerConnection)
     }
 
     private func startCameraTrack(on peerConnection: RTCPeerConnection) throws {
@@ -1891,7 +1927,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
                     self.decodedVideoFrameCount = decodedFrames
                 }
 
-                if stalledChecks >= 2, let roomCode = self.roomCode, let repository = self.repository {
+                if stalledChecks >= 6, let roomCode = self.roomCode, let repository = self.repository {
                     await self.restartController(roomCode: roomCode, repository: repository)
                     return
                 }
@@ -1908,16 +1944,51 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
 
     private func restartController(roomCode: String, repository: any RoomRepository) async {
         reconnectCount += 1
-        stop()
-        try? await Task.sleep(for: .milliseconds(400))
-        await startController(roomCode: roomCode, repository: repository)
+        prepareControllerReconnect()
+        try? await Task.sleep(for: .milliseconds(150))
+        await startController(roomCode: roomCode, repository: repository, preserveRemotePreview: true)
+    }
+
+    private func prepareControllerReconnect() {
+        #if canImport(WebRTC)
+        signalingTask?.cancel()
+        signalingTask = nil
+        candidatePollingTask?.cancel()
+        candidatePollingTask = nil
+        videoWatchdogTask?.cancel()
+        videoWatchdogTask = nil
+        peerConnection?.close()
+        peerConnection = nil
+        appliedRemoteCandidateIDs.removeAll()
+        rtcSessionId = nil
+        state = .connecting
+        iceConnectionStateDescription = "reconnecting"
+        #endif
     }
 
     private func restartHost(roomCode: String, repository: any RoomRepository) async {
         reconnectCount += 1
-        stop()
-        try? await Task.sleep(for: .milliseconds(250))
-        await startHost(roomCode: roomCode, repository: repository)
+        prepareHostReconnect()
+        try? await Task.sleep(for: .milliseconds(100))
+        await startHost(roomCode: roomCode, repository: repository, preserveLocalCapture: true)
+    }
+
+    private func prepareHostReconnect() {
+        #if canImport(WebRTC)
+        signalingTask?.cancel()
+        signalingTask = nil
+        candidatePollingTask?.cancel()
+        candidatePollingTask = nil
+        videoWatchdogTask?.cancel()
+        videoWatchdogTask = nil
+        peerConnection?.close()
+        peerConnection = nil
+        videoSender = nil
+        appliedRemoteCandidateIDs.removeAll()
+        rtcSessionId = nil
+        state = .connecting
+        iceConnectionStateDescription = "reconnecting"
+        #endif
     }
 
     private func decodedVideoFrames() async -> Int? {
@@ -3347,38 +3418,13 @@ struct WaitingForApprovalScreen: View {
                     didPrewarmControllerStream = true
                     await services.webRtcSession.startController(roomCode: roomCode, repository: services.roomRepository)
                 }
-                if nextRoom.controllerApproved {
-                    scheduleFirstFrameRetryIfNeeded()
-                } else {
+                if !nextRoom.controllerApproved {
                     cancelFirstFrameRetry()
                 }
             }
         } catch {
             errorMessage = error.localizedDescription
         }
-    }
-
-    private func scheduleFirstFrameRetryIfNeeded() {
-        #if canImport(WebRTC)
-        guard services.webRtcSession.remoteVideoTrack == nil else {
-            cancelFirstFrameRetry()
-            return
-        }
-        guard firstFrameRetryTask == nil, firstFrameRetryCount < 3 else { return }
-        firstFrameRetryTask = Task {
-            try? await Task.sleep(for: .milliseconds(2500))
-            guard !Task.isCancelled else { return }
-            guard room?.controllerApproved == true else { return }
-            guard services.webRtcSession.remoteVideoTrack == nil else {
-                cancelFirstFrameRetry()
-                return
-            }
-            firstFrameRetryCount += 1
-            firstFrameRetryTask = nil
-            await services.webRtcSession.retryControllerConnection(roomCode: roomCode, repository: services.roomRepository)
-            scheduleFirstFrameRetryIfNeeded()
-        }
-        #endif
     }
 
     private func cancelFirstFrameRetry() {
