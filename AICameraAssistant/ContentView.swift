@@ -10,154 +10,6 @@ import FirebaseFirestore
 import WebRTC
 #endif
 
-enum AppRoute: Hashable {
-    case cameraHost(roomCode: String)
-    case controllerEntry
-    case waitingForApproval(roomCode: String)
-}
-
-enum LensFacing: String, CaseIterable, Codable, Sendable {
-    case back
-    case front
-}
-
-enum RoomStatus: String, Codable, Sendable {
-    case created = "waiting"
-    case waitingForApproval = "request_received"
-    case connected
-    case denied
-    case disconnected
-    case ended
-}
-
-struct CaptureRequest: Codable, Equatable, Sendable {
-    var id: String
-    var type: String
-    var requestedAt: Date
-
-    nonisolated static func new(type: String = "photo") -> CaptureRequest {
-        CaptureRequest(id: UUID().uuidString, type: type, requestedAt: Date())
-    }
-}
-
-struct IceCandidatePayload: Codable, Equatable, Sendable, Identifiable {
-    var id: String { candidate + sdpMid + String(sdpMLineIndex) }
-    var candidate: String
-    var sdpMid: String
-    var sdpMLineIndex: Int32
-}
-
-struct RoomDocument: Codable, Equatable, Sendable {
-    var roomCode: String
-    var status: RoomStatus
-    var requestReceived: Bool
-    var controllerApproved: Bool
-    var captureRequest: CaptureRequest?
-    var lensFacing: LensFacing
-    var zoomLevel: Double
-    var minZoom: Double
-    var maxZoom: Double
-    var flashEnabled: Bool
-    var flashMode: String
-    var flashSupported: Bool
-    var cameraMode: String
-    var aspectRatioMode: String
-    var gridEnabled: Bool
-    var nightModeEnabled: Bool
-    var videoHdrSupported: Bool
-    var videoHdrEnabled: Bool
-    var toolbarExpanded: Bool
-    var focusRequestId: Int
-    var focusPointX: Double
-    var focusPointY: Double
-    var focusLockEnabled: Bool
-    var exposureMinIndex: Int
-    var exposureMaxIndex: Int
-    var exposureIndex: Int
-    var rtcSessionId: String?
-    var sessionVersion: Int
-    var previewWidth: Int
-    var previewHeight: Int
-    var offer: String?
-    var answer: String?
-    var cameraCandidates: [IceCandidatePayload]
-    var controllerCandidates: [IceCandidatePayload]
-    var updatedAt: Date
-
-    nonisolated static func initial(roomCode: String) -> RoomDocument {
-        RoomDocument(
-            roomCode: roomCode,
-            status: .created,
-            requestReceived: false,
-            controllerApproved: false,
-            captureRequest: nil,
-            lensFacing: .back,
-            zoomLevel: 1.0,
-            minZoom: 1.0,
-            maxZoom: 8.0,
-            flashEnabled: false,
-            flashMode: "off",
-            flashSupported: true,
-            cameraMode: "photo",
-            aspectRatioMode: "full",
-            gridEnabled: false,
-            nightModeEnabled: false,
-            videoHdrSupported: false,
-            videoHdrEnabled: false,
-            toolbarExpanded: false,
-            focusRequestId: 0,
-            focusPointX: 0.5,
-            focusPointY: 0.5,
-            focusLockEnabled: false,
-            exposureMinIndex: 0,
-            exposureMaxIndex: 0,
-            exposureIndex: 0,
-            rtcSessionId: nil,
-            sessionVersion: Int(Date().timeIntervalSince1970 * 1000),
-            previewWidth: 0,
-            previewHeight: 0,
-            offer: nil,
-            answer: nil,
-            cameraCandidates: [],
-            controllerCandidates: [],
-            updatedAt: Date()
-        )
-    }
-}
-
-extension String {
-    nonisolated var normalizedRoomCode: String {
-        trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-    }
-}
-
-protocol RoomRepository: Sendable {
-    func createRoom() async throws -> RoomDocument
-    func room(roomCode: String) async throws -> RoomDocument?
-    func observeRoom(roomCode: String) async -> AsyncThrowingStream<RoomDocument, Error>
-    func requestConnection(roomCode: String) async throws
-    func approveController(roomCode: String) async throws
-    func denyController(roomCode: String) async throws
-    func updateControls(roomCode: String, lensFacing: LensFacing, zoomLevel: Double, flashEnabled: Bool) async throws
-    func updateGridEnabled(roomCode: String, gridEnabled: Bool) async throws
-    func updateAspectRatioMode(roomCode: String, aspectRatioMode: String) async throws
-    func updateFocusRequest(roomCode: String, x: Double, y: Double, requestId: Int, lockEnabled: Bool) async throws
-    func updateExposureIndex(roomCode: String, exposureIndex: Int) async throws
-    func requestCapture(roomCode: String) async throws
-    func setOffer(_ sdp: String, roomCode: String, rtcSessionId: String) async throws
-    func setAnswer(_ sdp: String, roomCode: String, rtcSessionId: String) async throws
-    func addCameraCandidate(_ candidate: IceCandidatePayload, roomCode: String, rtcSessionId: String) async throws
-    func addControllerCandidate(_ candidate: IceCandidatePayload, roomCode: String, rtcSessionId: String) async throws
-    func cameraCandidates(roomCode: String, rtcSessionId: String?) async throws -> [IceCandidatePayload]
-    func controllerCandidates(roomCode: String, rtcSessionId: String?) async throws -> [IceCandidatePayload]
-}
-
-enum RoomRepositoryError: LocalizedError {
-    case roomNotFound
-
-    var errorDescription: String? { "Room not found." }
-}
-
 actor LocalRoomRepository: RoomRepository {
     static let shared = LocalRoomRepository()
 
@@ -889,39 +741,6 @@ struct FirestoreValue: Codable {
     }()
 }
 
-@MainActor
-final class AppServices: ObservableObject {
-    let roomRepository: any RoomRepository
-    let webRtcSession: WebRtcSessionManager
-    private var webRtcCancellable: AnyCancellable?
-
-    init() {
-        self.roomRepository = Self.makeRoomRepository()
-        self.webRtcSession = WebRtcSessionManager()
-        bindWebRtcSession()
-    }
-
-    init(roomRepository: any RoomRepository, webRtcSession: WebRtcSessionManager) {
-        self.roomRepository = roomRepository
-        self.webRtcSession = webRtcSession
-        bindWebRtcSession()
-    }
-
-    private static func makeRoomRepository() -> any RoomRepository {
-        #if canImport(FirebaseFirestore)
-        return FirebaseSDKRoomRepository()
-        #else
-        FirestoreRESTConfiguration.load() == nil ? LocalRoomRepository.shared : FirestoreRoomRepository()
-        #endif
-    }
-
-    private func bindWebRtcSession() {
-        webRtcCancellable = webRtcSession.objectWillChange.sink { [weak self] _ in
-            self?.objectWillChange.send()
-        }
-    }
-}
-
 #if canImport(FirebaseFirestore)
 final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
     private let db = Firestore.firestore()
@@ -1509,7 +1328,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     private func configureVideoSender(_ sender: RTCRtpSender) {
         let parameters = sender.parameters
         parameters.encodings.forEach { encoding in
-            encoding.minBitrateBps = NSNumber(value: 180_000)
+            encoding.minBitrateBps = NSNumber(value: 90_000)
             encoding.maxBitrateBps = NSNumber(value: 650_000)
             encoding.maxFramerate = NSNumber(value: 10)
         }
@@ -1541,9 +1360,12 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         }
         candidatePollingTask = Task { [weak self] in
             guard let self else { return }
+            var pollCount = 0
             while !Task.isCancelled {
                 await self.applyRemoteCandidates(roomCode: roomCode, repository: repository)
-                try? await Task.sleep(for: .seconds(3))
+                pollCount += 1
+                let delay: Duration = pollCount < 20 ? .milliseconds(350) : .seconds(3)
+                try? await Task.sleep(for: delay)
             }
         }
     }
@@ -1555,7 +1377,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
                 rtcSessionId = roomRtcSessionId
             }
 
-            if role == .host, peerConnection.remoteDescription == nil, let offerSdp = room.offer {
+            if role == .host, room.controllerApproved, peerConnection.remoteDescription == nil, let offerSdp = room.offer {
                 try await peerConnection.setRemoteDescriptionAsync(RTCSessionDescription(type: .offer, sdp: offerSdp))
                 let answer = try await makeAnswer(on: peerConnection)
                 try await peerConnection.setLocalDescriptionAsync(answer)
@@ -2115,257 +1937,6 @@ private final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegat
     }
 }
 
-struct CameraPreviewView: UIViewRepresentable {
-    let session: AVCaptureSession
-
-    func makeUIView(context: Context) -> PreviewContainerView {
-        let view = PreviewContainerView()
-        view.previewLayer.session = session
-        view.previewLayer.videoGravity = .resizeAspectFill
-        return view
-    }
-
-    func updateUIView(_ uiView: PreviewContainerView, context: Context) {
-        uiView.previewLayer.session = session
-    }
-}
-
-final class PreviewContainerView: UIView {
-    override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
-    var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
-}
-
-struct CameraCircleButton: View {
-    let systemName: String
-    var size: CGFloat = 48
-    var role: ButtonRole?
-    var isSelected = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(role: role, action: action) {
-            Image(systemName: systemName)
-                .font(.system(size: size * 0.38, weight: .semibold))
-                .frame(width: size, height: size)
-                .background(isSelected ? Color.white : Color.black.opacity(0.42), in: Circle())
-                .overlay(Circle().stroke(.white.opacity(0.18), lineWidth: 1))
-                .foregroundStyle(isSelected ? .black : .white)
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-struct CameraStatusPill: View {
-    let primary: String
-    let secondary: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(primary)
-                .font(.headline)
-                .lineLimit(1)
-            Text(secondary)
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.75))
-                .lineLimit(1)
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 9)
-        .background(Color.black.opacity(0.42), in: Capsule())
-        .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 1))
-    }
-}
-
-struct CameraGridOverlay: View {
-    var body: some View {
-        GeometryReader { geometry in
-            Path { path in
-                let width = geometry.size.width
-                let height = geometry.size.height
-                for index in 1...2 {
-                    let x = width * CGFloat(index) / 3.0
-                    path.move(to: CGPoint(x: x, y: 0))
-                    path.addLine(to: CGPoint(x: x, y: height))
-                    let y = height * CGFloat(index) / 3.0
-                    path.move(to: CGPoint(x: 0, y: y))
-                    path.addLine(to: CGPoint(x: width, y: y))
-                }
-            }
-            .stroke(.white.opacity(0.38), lineWidth: 0.8)
-        }
-        .allowsHitTesting(false)
-    }
-}
-
-struct FocusReticleView: View {
-    let point: CGPoint
-
-    var body: some View {
-        GeometryReader { geometry in
-            RoundedRectangle(cornerRadius: 6)
-                .stroke(.yellow, lineWidth: 2)
-                .frame(width: 72, height: 72)
-                .position(
-                    x: point.x * geometry.size.width,
-                    y: point.y * geometry.size.height
-                )
-        }
-        .allowsHitTesting(false)
-    }
-}
-
-struct FocusExposureOverlay: View {
-    let point: CGPoint
-    @Binding var exposureValue: Double
-    var isInteractive = false
-    var onExposureChanged: (Double) -> Void = { _ in }
-    var onExposureCommitted: (Double) -> Void = { _ in }
-
-    private let exposureTrackHeight: CGFloat = 142
-
-    var body: some View {
-        GeometryReader { geometry in
-            let x = point.x * geometry.size.width
-            let y = point.y * geometry.size.height
-            ZStack {
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(.yellow, lineWidth: 2)
-                    .frame(width: 72, height: 72)
-                    .position(x: x, y: y)
-                    .allowsHitTesting(false)
-
-                exposureControl
-                    .allowsHitTesting(isInteractive)
-                    .position(
-                        x: min(max(x + 58, 28), geometry.size.width - 28),
-                        y: min(max(y, exposureTrackHeight / 2 + 26), geometry.size.height - exposureTrackHeight / 2 - 26)
-                    )
-            }
-        }
-    }
-
-    private var exposureControl: some View {
-        VStack(spacing: 7) {
-            Image(systemName: "sun.max")
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(.yellow)
-
-            ZStack {
-                Capsule()
-                    .fill(.yellow.opacity(0.9))
-                    .frame(width: 2, height: exposureTrackHeight)
-
-                Circle()
-                    .fill(.yellow)
-                    .frame(width: 16, height: 16)
-                    .overlay(Circle().stroke(.black.opacity(0.35), lineWidth: 1))
-                    .shadow(color: .black.opacity(0.28), radius: 2, x: 0, y: 1)
-                    .offset(y: knobOffset)
-
-                Rectangle()
-                    .fill(.clear)
-                    .frame(width: 44, height: exposureTrackHeight)
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { value in
-                                guard isInteractive else { return }
-                                updateExposure(from: value.location.y, shouldCommit: false)
-                            }
-                            .onEnded { value in
-                                guard isInteractive else { return }
-                                updateExposure(from: value.location.y, shouldCommit: true)
-                            }
-                    )
-            }
-        }
-        .frame(width: 44, height: exposureTrackHeight + 31)
-    }
-
-    private var knobOffset: CGFloat {
-        -CGFloat(exposureValue) * exposureTrackHeight / 2
-    }
-
-    private func updateExposure(from yLocation: CGFloat, shouldCommit: Bool) {
-        let clampedY = min(max(yLocation, 0), exposureTrackHeight)
-        let normalized = 1.0 - Double(clampedY / exposureTrackHeight)
-        let nextValue = min(max((normalized * 2.0) - 1.0, -1.0), 1.0)
-        if abs(nextValue - exposureValue) > 0.01 {
-            exposureValue = nextValue
-            onExposureChanged(nextValue)
-        }
-        if shouldCommit {
-            onExposureCommitted(nextValue)
-        }
-    }
-}
-
-extension String {
-    var nextCameraAspectRatioMode: String {
-        switch self {
-        case "full": return "4:3"
-        case "4:3": return "square"
-        default: return "full"
-        }
-    }
-
-    var cameraAspectRatioLabel: String {
-        switch self {
-        case "4:3": return "4:3"
-        case "square": return "1:1"
-        default: return "Full"
-        }
-    }
-
-    var cameraAspectRatioValue: CGFloat? {
-        switch self {
-        case "4:3": return 3.0 / 4.0
-        case "square": return 1.0
-        default: return nil
-        }
-    }
-
-    var cameraPreviewAspectRatio: CGFloat {
-        switch self {
-        case "4:3": return 3.0 / 4.0
-        case "square": return 1.0
-        default: return 9.0 / 16.0
-        }
-    }
-}
-
-#if canImport(WebRTC)
-struct RemoteVideoView: UIViewRepresentable {
-    let track: RTCVideoTrack?
-
-    func makeUIView(context: Context) -> RTCMTLVideoView {
-        let view = RTCMTLVideoView()
-        view.videoContentMode = .scaleAspectFill
-        return view
-    }
-
-    func updateUIView(_ uiView: RTCMTLVideoView, context: Context) {
-        context.coordinator.update(track: track, renderer: uiView)
-    }
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
-
-    final class Coordinator {
-        private weak var currentTrack: RTCVideoTrack?
-
-        func update(track: RTCVideoTrack?, renderer: RTCMTLVideoView) {
-            guard currentTrack !== track else { return }
-            currentTrack?.remove(renderer)
-            currentTrack = track
-            track?.add(renderer)
-        }
-    }
-}
-#endif
-
 struct ContentView: View {
     @StateObject private var services = AppServices()
     @State private var path = NavigationPath()
@@ -2507,6 +2078,7 @@ struct CameraHostScreen: View {
     @State private var lastAppliedExposureIndex: Int?
     @State private var focusReticlePoint: CGPoint?
     @State private var exposureValue = 0.0
+    @State private var isPrewarmingHostStream = false
 
     var body: some View {
         ZStack {
@@ -2692,6 +2264,7 @@ struct CameraHostScreen: View {
                     applyExposureIfNeeded(nextRoom.exposureIndex)
                 }
                 exposureValue = Double(nextRoom.exposureIndex) / 8.0
+                prewarmHostStreamIfNeeded(for: nextRoom)
                 handleFocusRequest(nextRoom)
                 handleCaptureRequest(nextRoom.captureRequest)
             }
@@ -2752,12 +2325,25 @@ struct CameraHostScreen: View {
         services.webRtcSession.applyExposureIndex(exposureIndex)
     }
 
+    private func prewarmHostStreamIfNeeded(for room: RoomDocument) {
+        guard room.requestReceived, !room.controllerApproved else { return }
+        guard services.webRtcSession.state == .idle, !isPrewarmingHostStream else { return }
+        isPrewarmingHostStream = true
+        Task {
+            await camera.stopAndWait()
+            await services.webRtcSession.startHost(roomCode: roomCode, repository: services.roomRepository)
+            isPrewarmingHostStream = false
+        }
+    }
+
     private func updateApproval(approved: Bool) {
         Task {
             do {
                 if approved {
-                    await camera.stopAndWait()
-                    await services.webRtcSession.startHost(roomCode: roomCode, repository: services.roomRepository)
+                    if services.webRtcSession.state == .idle {
+                        await camera.stopAndWait()
+                        await services.webRtcSession.startHost(roomCode: roomCode, repository: services.roomRepository)
+                    }
                     try await services.roomRepository.approveController(roomCode: roomCode)
                 } else {
                     try await services.roomRepository.denyController(roomCode: roomCode)
@@ -2796,6 +2382,7 @@ struct WaitingForApprovalScreen: View {
     @State private var focusReticlePoint: CGPoint?
     @State private var exposureValue = 0.0
     @State private var exposurePublishTask: Task<Void, Never>?
+    @State private var didPrewarmControllerStream = false
 
     var body: some View {
         ZStack {
@@ -3049,7 +2636,8 @@ struct WaitingForApprovalScreen: View {
                 zoomLevel = nextRoom.zoomLevel
                 flashEnabled = nextRoom.flashEnabled
                 exposureValue = Double(nextRoom.exposureIndex) / 8.0
-                if nextRoom.controllerApproved {
+                if !didPrewarmControllerStream {
+                    didPrewarmControllerStream = true
                     await services.webRtcSession.startController(roomCode: roomCode, repository: services.roomRepository)
                 }
             }
