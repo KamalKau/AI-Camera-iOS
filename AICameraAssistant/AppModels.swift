@@ -125,7 +125,7 @@ struct RoomDocument: Codable, Equatable, Sendable {
             exposureMinIndex: 0,
             exposureMaxIndex: 0,
             exposureIndex: 0,
-            streamQualityMode: .balanced,
+            streamQualityMode: .lowLatency,
             rtcSessionId: nil,
             sessionVersion: Int(Date().timeIntervalSince1970 * 1000),
             previewWidth: 0,
