@@ -1,5 +1,6 @@
 @preconcurrency import AVFoundation
 import Combine
+import CoreImage
 import Photos
 import SwiftUI
 import UIKit
@@ -1186,6 +1187,8 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     private var activeZoomLevel = 1.0
     private var activeFlashEnabled = false
     private let hostPhotoOutput = AVCapturePhotoOutput()
+    private let hostVideoFrameOutput = AVCaptureVideoDataOutput()
+    private let hostFrameCache = VideoFrameCache()
     private let hostMovieOutput = AVCaptureMovieFileOutput()
     private var pendingHostPhotoDelegates: [Int64: PhotoCaptureDelegate] = [:]
     private var hostMovieDelegate: MovieCaptureDelegate?
@@ -1406,8 +1409,13 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
             completion(nil)
             return
         }
+        if let image = hostFrameCache.latestImage(lensFacing: activeLensFacing) {
+            completion(image)
+            return
+        }
         configureHostPhotoOutput(on: cameraCapturer)
         let settings = AVCapturePhotoSettings()
+        settings.photoQualityPrioritization = .speed
         if hostPhotoOutput.supportedFlashModes.contains(.on) {
             settings.flashMode = activeFlashEnabled ? .on : .off
         }
@@ -1450,6 +1458,23 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         #endif
     }
 
+    func finishHostVideoRecordingBeforeTeardown() async {
+        #if canImport(WebRTC)
+        guard isHostVideoRecording || isPreparingHostVideoRecording || hostMovieOutput.isRecording else { return }
+        await withCheckedContinuation { continuation in
+            let existingCompletion = hostRecordingCompletion
+            var didResume = false
+            hostRecordingCompletion = { url, error in
+                existingCompletion?(url, error)
+                guard !didResume else { return }
+                didResume = true
+                continuation.resume()
+            }
+            stopHostVideoRecording()
+        }
+        #endif
+    }
+
     #if canImport(WebRTC)
     private func makePeerConnection() throws -> RTCPeerConnection {
         guard let factory else { throw WebRtcSessionError.factoryUnavailable }
@@ -1474,6 +1499,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
                 configureVideoSender(sender)
             }
             configureHostPhotoOutput(on: cameraCapturer)
+            configureHostVideoFrameOutput(on: cameraCapturer)
             return
         }
 
@@ -1493,6 +1519,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         cameraCapturer = capturer
         localVideoTrack = videoTrack
         configureHostPhotoOutput(on: capturer)
+        configureHostVideoFrameOutput(on: capturer)
         try startCapture(capturer, lensFacing: activeLensFacing)
     }
 
@@ -1501,6 +1528,19 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         guard !session.outputs.contains(hostPhotoOutput), session.canAddOutput(hostPhotoOutput) else { return }
         session.beginConfiguration()
         session.addOutput(hostPhotoOutput)
+        session.commitConfiguration()
+    }
+
+    private func configureHostVideoFrameOutput(on capturer: RTCCameraVideoCapturer) {
+        let session = capturer.captureSession
+        guard !session.outputs.contains(hostVideoFrameOutput), session.canAddOutput(hostVideoFrameOutput) else { return }
+        hostVideoFrameOutput.alwaysDiscardsLateVideoFrames = true
+        hostVideoFrameOutput.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ]
+        hostVideoFrameOutput.setSampleBufferDelegate(hostFrameCache, queue: hostFrameCache.queue)
+        session.beginConfiguration()
+        session.addOutput(hostVideoFrameOutput)
         session.commitConfiguration()
     }
 
@@ -2328,6 +2368,7 @@ final class CameraController: NSObject, ObservableObject {
 
     func capturePhoto(completion: ((UIImage?) -> Void)? = nil) {
         let settings = AVCapturePhotoSettings()
+        settings.photoQualityPrioritization = .speed
         if photoOutput.supportedFlashModes.contains(.on) {
             settings.flashMode = flashEnabled ? .on : .off
         }
@@ -2335,9 +2376,11 @@ final class CameraController: NSObject, ObservableObject {
         let delegate = PhotoCaptureDelegate { [weak self] image in
             Task { @MainActor in
                 self?.lastCapturedImage = image
-                await self?.saveCapturedPhoto(image)
                 self?.pendingPhotoDelegates[uniqueID] = nil
                 completion?(image)
+                Task { @MainActor in
+                    await self?.saveCapturedPhoto(image)
+                }
             }
         }
         pendingPhotoDelegates[uniqueID] = delegate
@@ -2570,6 +2613,50 @@ final class CameraController: NSObject, ObservableObject {
     }
 }
 
+private final class VideoFrameCache: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
+    let queue = DispatchQueue(label: "camera.video.frame.cache.queue")
+
+    private let context = CIContext()
+    private let lock = NSLock()
+    private var cgImage: CGImage?
+
+    @MainActor
+    func latestImage(lensFacing: LensFacing) -> UIImage? {
+        lock.lock()
+        let image = cgImage
+        lock.unlock()
+        guard let image else { return nil }
+        return UIImage(cgImage: image, scale: 1.0, orientation: Self.imageOrientation(lensFacing: lensFacing))
+    }
+
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didOutput sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        guard let image = context.createCGImage(ciImage, from: ciImage.extent) else { return }
+        lock.lock()
+        cgImage = image
+        lock.unlock()
+    }
+
+    @MainActor
+    private static func imageOrientation(lensFacing: LensFacing) -> UIImage.Orientation {
+        switch UIDevice.current.orientation {
+        case .landscapeLeft:
+            return lensFacing == .front ? .downMirrored : .up
+        case .landscapeRight:
+            return lensFacing == .front ? .upMirrored : .down
+        case .portraitUpsideDown:
+            return lensFacing == .front ? .rightMirrored : .left
+        default:
+            return lensFacing == .front ? .leftMirrored : .right
+        }
+    }
+}
+
 private final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {
     private let completion: (UIImage?) -> Void
 
@@ -2770,8 +2857,11 @@ struct CameraHostScreen: View {
             await observeRoom()
         }
         .onDisappear {
-            camera.stop()
-            services.webRtcSession.stop()
+            Task {
+                await services.webRtcSession.finishHostVideoRecordingBeforeTeardown()
+                camera.stop()
+                services.webRtcSession.stop()
+            }
         }
     }
 
@@ -2929,8 +3019,8 @@ struct CameraHostScreen: View {
             for try await nextRoom in await services.roomRepository.observeRoom(roomCode: roomCode) {
                 room = nextRoom
                 if nextRoom.status == .ended {
-                    returnToStart()
-                    continue
+                    await returnToStart()
+                    return
                 }
                 if nextRoom.status == .denied {
                     services.webRtcSession.stop()
@@ -2983,11 +3073,9 @@ struct CameraHostScreen: View {
             default:
                 if services.webRtcSession.state != .idle {
                     services.webRtcSession.captureHostPhoto { image in
-                        Task {
-                            await camera.saveCapturedPhotoFromStream(image)
-                            resetCaptureRequest()
-                            isHandlingRemoteCapture = false
-                        }
+                        Task { await camera.saveCapturedPhotoFromStream(image) }
+                        resetCaptureRequest()
+                        isHandlingRemoteCapture = false
                     }
                 } else {
                     camera.capturePhoto { _ in
@@ -3056,14 +3144,15 @@ struct CameraHostScreen: View {
         Task {
             do {
                 try await services.roomRepository.endSession(roomCode: roomCode)
-                returnToStart()
+                await returnToStart()
             } catch {
                 errorMessage = error.localizedDescription
             }
         }
     }
 
-    private func returnToStart() {
+    private func returnToStart() async {
+        await services.webRtcSession.finishHostVideoRecordingBeforeTeardown()
         services.webRtcSession.stop()
         camera.stop()
         path = NavigationPath()
@@ -3146,6 +3235,7 @@ struct WaitingForApprovalScreen: View {
             zoomPublishTask?.cancel()
             exposurePublishTask?.cancel()
             firstFrameRetryTask?.cancel()
+            resetControllerSessionState()
             services.webRtcSession.stop()
         }
     }
@@ -3401,9 +3491,10 @@ struct WaitingForApprovalScreen: View {
                 room = nextRoom
                 if nextRoom.status == .ended {
                     returnToStart()
-                    continue
+                    return
                 }
                 if nextRoom.status == .denied {
+                    resetControllerSessionState()
                     cancelFirstFrameRetry()
                     services.webRtcSession.stop()
                     continue
@@ -3540,12 +3631,17 @@ struct WaitingForApprovalScreen: View {
 
     private func updateCameraMode(_ mode: String) {
         guard cameraMode != mode else { return }
+        let shouldStopActiveVideo = cameraMode == "video" && mode != "video" && isVideoRecording
         cameraMode = mode
         if mode != "video" {
             isVideoRecording = false
         }
         Task {
             do {
+                if shouldStopActiveVideo {
+                    try await services.roomRepository.requestCapture(roomCode: roomCode, type: "video_stop")
+                    captureFeedback = "Recording stopped"
+                }
                 try await services.roomRepository.updateCameraMode(roomCode: roomCode, cameraMode: mode)
             } catch {
                 errorMessage = error.localizedDescription
@@ -3565,9 +3661,17 @@ struct WaitingForApprovalScreen: View {
     }
 
     private func returnToStart() {
+        resetControllerSessionState()
         cancelFirstFrameRetry()
         services.webRtcSession.stop()
         path = NavigationPath()
+    }
+
+    private func resetControllerSessionState() {
+        isCaptureRequesting = false
+        isSwitchingCameraDuringRecording = false
+        isVideoRecording = false
+        captureFeedback = nil
     }
 
     private func updateGridEnabled(_ enabled: Bool) {
