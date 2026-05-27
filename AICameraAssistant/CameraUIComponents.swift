@@ -141,6 +141,13 @@ struct FocusExposureOverlay: View {
                 .font(.system(size: 17, weight: .medium))
                 .foregroundStyle(.yellow)
 
+            Text(exposureLabel)
+                .font(.caption2.monospacedDigit().weight(.semibold))
+                .foregroundStyle(.yellow)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(Color.black.opacity(0.34), in: Capsule())
+
             ZStack {
                 Capsule()
                     .fill(.yellow.opacity(0.9))
@@ -170,7 +177,11 @@ struct FocusExposureOverlay: View {
                     )
             }
         }
-        .frame(width: 44, height: exposureTrackHeight + 31)
+        .frame(width: 48, height: exposureTrackHeight + 54)
+    }
+
+    private var exposureLabel: String {
+        String(format: "%+.1f", exposureValue * 4.0)
     }
 
     private var knobOffset: CGFloat {

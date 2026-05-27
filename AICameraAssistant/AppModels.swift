@@ -136,6 +136,7 @@ protocol RoomRepository: Sendable {
     func requestConnection(roomCode: String) async throws
     func approveController(roomCode: String) async throws
     func denyController(roomCode: String) async throws
+    func endSession(roomCode: String) async throws
     func updateControls(roomCode: String, lensFacing: LensFacing, zoomLevel: Double, flashEnabled: Bool) async throws
     func updateGridEnabled(roomCode: String, gridEnabled: Bool) async throws
     func updateAspectRatioMode(roomCode: String, aspectRatioMode: String) async throws

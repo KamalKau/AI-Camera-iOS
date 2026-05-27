@@ -67,6 +67,19 @@ actor LocalRoomRepository: RoomRepository {
         }
     }
 
+    func endSession(roomCode: String) async throws {
+        try update(roomCode: roomCode) { room in
+            room.requestReceived = false
+            room.controllerApproved = false
+            room.status = .ended
+            room.offer = nil
+            room.answer = nil
+            room.rtcSessionId = nil
+            room.cameraCandidates = []
+            room.controllerCandidates = []
+        }
+    }
+
     func updateControls(roomCode: String, lensFacing: LensFacing, zoomLevel: Double, flashEnabled: Bool) async throws {
         try update(roomCode: roomCode) { room in
             room.lensFacing = lensFacing
@@ -244,6 +257,18 @@ actor FirestoreRoomRepository: RoomRepository {
 
     func denyController(roomCode: String) async throws {
         try await update(roomCode: roomCode, values: ["controllerApproved": false, "status": RoomStatus.denied.rawValue])
+    }
+
+    func endSession(roomCode: String) async throws {
+        try await clearIceCandidates(roomCode: roomCode)
+        try await update(roomCode: roomCode, values: [
+            "requestReceived": false,
+            "controllerApproved": false,
+            "status": RoomStatus.ended.rawValue,
+            "offer": FirestoreValue.null,
+            "answer": FirestoreValue.null,
+            "rtcSessionId": FirestoreValue.null
+        ])
     }
 
     func updateControls(roomCode: String, lensFacing: LensFacing, zoomLevel: Double, flashEnabled: Bool) async throws {
@@ -800,6 +825,18 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
         try await update(roomCode: roomCode, values: [
             "controllerApproved": false,
             "status": RoomStatus.denied.rawValue
+        ])
+    }
+
+    func endSession(roomCode: String) async throws {
+        try await clearIceCandidates(roomCode: roomCode)
+        try await update(roomCode: roomCode, values: [
+            "requestReceived": false,
+            "controllerApproved": false,
+            "status": RoomStatus.ended.rawValue,
+            "offer": FieldValue.delete(),
+            "answer": FieldValue.delete(),
+            "rtcSessionId": FieldValue.delete()
         ])
     }
 
@@ -2189,7 +2226,10 @@ struct CameraHostScreen: View {
             await camera.requestPermissionAndStart()
             await observeRoom()
         }
-        .onDisappear { camera.stop() }
+        .onDisappear {
+            camera.stop()
+            services.webRtcSession.stop()
+        }
     }
 
     @ViewBuilder
@@ -2254,6 +2294,10 @@ struct CameraHostScreen: View {
 
             CameraCircleButton(systemName: "aspectratio") {
                 updateAspectRatioMode((room?.aspectRatioMode ?? "full").nextCameraAspectRatioMode)
+            }
+
+            CameraCircleButton(systemName: "xmark.circle", role: .destructive) {
+                endSession()
             }
 
         }
@@ -2329,7 +2373,8 @@ struct CameraHostScreen: View {
         switch room.status {
         case .created: return "Waiting for controller"
         case .waitingForApproval: return "Controller is requesting access"
-        case .connected: return "Controller connected"
+        case .connected:
+            return services.webRtcSession.state == .connected ? "Controller connected" : "Starting live preview"
         case .denied: return "Controller denied"
         case .disconnected: return "Disconnected"
         case .ended: return "Session ended"
@@ -2340,6 +2385,16 @@ struct CameraHostScreen: View {
         do {
             for try await nextRoom in await services.roomRepository.observeRoom(roomCode: roomCode) {
                 room = nextRoom
+                if nextRoom.status == .ended {
+                    services.webRtcSession.stop()
+                    camera.stop()
+                    continue
+                }
+                if nextRoom.status == .denied {
+                    services.webRtcSession.stop()
+                    await camera.requestPermissionAndStart()
+                    continue
+                }
                 services.webRtcSession.applyStreamQualityMode(nextRoom.streamQualityMode)
                 if services.webRtcSession.state == .idle {
                     camera.apply(lensFacing: nextRoom.lensFacing, zoomLevel: nextRoom.zoomLevel, flashEnabled: nextRoom.flashEnabled)
@@ -2401,7 +2456,7 @@ struct CameraHostScreen: View {
         focusReticlePoint = point
         services.webRtcSession.applyFocusPoint(x: point.x, y: point.y, lockEnabled: room.focusLockEnabled)
         Task {
-            try? await Task.sleep(for: .seconds(1))
+            try? await Task.sleep(for: .milliseconds(1600))
             if focusReticlePoint == point {
                 focusReticlePoint = nil
             }
@@ -2443,6 +2498,18 @@ struct CameraHostScreen: View {
         }
     }
 
+    private func endSession() {
+        Task {
+            do {
+                try await services.roomRepository.endSession(roomCode: roomCode)
+                services.webRtcSession.stop()
+                camera.stop()
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     private func publishCurrentControls() {
         Task {
             try? await services.roomRepository.updateControls(roomCode: roomCode, lensFacing: camera.lensFacing, zoomLevel: camera.zoomLevel, flashEnabled: camera.flashEnabled)
@@ -2474,6 +2541,9 @@ struct WaitingForApprovalScreen: View {
     @State private var firstFrameRetryTask: Task<Void, Never>?
     @State private var firstFrameRetryCount = 0
     @State private var didPrewarmControllerStream = false
+    @State private var isCaptureRequesting = false
+    @State private var captureFeedback: String?
+    @State private var shutterFlashVisible = false
 
     var body: some View {
         ZStack {
@@ -2499,6 +2569,13 @@ struct WaitingForApprovalScreen: View {
                 }
                 .padding(.trailing, 16)
             }
+
+            if shutterFlashVisible {
+                Color.white.opacity(0.32)
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
+            }
         }
         .toolbar(.hidden, for: .navigationBar)
         .task { await observeRoom() }
@@ -2506,6 +2583,7 @@ struct WaitingForApprovalScreen: View {
             zoomPublishTask?.cancel()
             exposurePublishTask?.cancel()
             firstFrameRetryTask?.cancel()
+            services.webRtcSession.stop()
         }
     }
 
@@ -2602,7 +2680,11 @@ struct WaitingForApprovalScreen: View {
     }
 
     private var previewStatusText: String {
+        if room?.status == .ended { return "Session ended" }
         guard room?.controllerApproved == true else { return "Waiting for host approval" }
+        if firstFrameRetryCount > 0, services.webRtcSession.remoteVideoTrack == nil {
+            return "Reconnecting live preview"
+        }
         switch services.webRtcSession.state {
         case .unavailable:
             return "WebRTC package is not linked to this app target"
@@ -2643,6 +2725,15 @@ struct WaitingForApprovalScreen: View {
             .padding(.vertical, 8)
             .background(Color.black.opacity(0.42), in: Capsule())
 
+            if let captureFeedback {
+                Text(captureFeedback)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(Color.black.opacity(0.48), in: Capsule())
+            }
+
             if let errorMessage {
                 Text(errorMessage)
                     .font(.footnote)
@@ -2675,6 +2766,10 @@ struct WaitingForApprovalScreen: View {
                 updateAspectRatioMode((room?.aspectRatioMode ?? "full").nextCameraAspectRatioMode)
             }
 
+            CameraCircleButton(systemName: "xmark.circle", role: .destructive) {
+                endSession()
+            }
+
         }
         .padding(.vertical, 10)
     }
@@ -2702,11 +2797,13 @@ struct WaitingForApprovalScreen: View {
                     .stroke(.white, lineWidth: 4)
                     .frame(width: 82, height: 82)
                 Circle()
-                    .fill(.white)
-                    .frame(width: 64, height: 64)
+                    .fill(isCaptureRequesting ? .white.opacity(0.72) : .white)
+                    .frame(width: isCaptureRequesting ? 58 : 64, height: isCaptureRequesting ? 58 : 64)
             }
+            .animation(.easeOut(duration: 0.12), value: isCaptureRequesting)
         }
         .buttonStyle(.plain)
+        .disabled(isCaptureRequesting || room?.status == .ended)
         .accessibilityLabel("Capture photo")
     }
 
@@ -2714,7 +2811,11 @@ struct WaitingForApprovalScreen: View {
         guard let room else { return "Connecting to room" }
         switch room.status {
         case .created, .waitingForApproval: return "Host approval required"
-        case .connected: return "Connected"
+        case .connected:
+            if firstFrameRetryCount > 0, services.webRtcSession.remoteVideoTrack == nil {
+                return "Reconnecting preview \(firstFrameRetryCount)/3"
+            }
+            return services.webRtcSession.state == .connected ? "Connected" : "Starting preview"
         case .denied: return "Request denied"
         case .disconnected: return "Disconnected"
         case .ended: return "Session ended"
@@ -2725,6 +2826,11 @@ struct WaitingForApprovalScreen: View {
         do {
             for try await nextRoom in await services.roomRepository.observeRoom(roomCode: roomCode) {
                 room = nextRoom
+                if nextRoom.status == .ended || nextRoom.status == .denied {
+                    cancelFirstFrameRetry()
+                    services.webRtcSession.stop()
+                    continue
+                }
                 services.webRtcSession.applyStreamQualityMode(nextRoom.streamQualityMode)
                 lensFacing = nextRoom.lensFacing
                 zoomLevel = nextRoom.zoomLevel
@@ -2801,9 +2907,42 @@ struct WaitingForApprovalScreen: View {
     }
 
     private func requestCapture() {
+        guard !isCaptureRequesting else { return }
+        isCaptureRequesting = true
+        captureFeedback = "Capturing..."
+        withAnimation(.easeOut(duration: 0.08)) {
+            shutterFlashVisible = true
+        }
+        Task {
+            try? await Task.sleep(for: .milliseconds(160))
+            await MainActor.run {
+                withAnimation(.easeOut(duration: 0.16)) {
+                    shutterFlashVisible = false
+                }
+            }
+        }
         Task {
             do {
                 try await services.roomRepository.requestCapture(roomCode: roomCode)
+                captureFeedback = "Capture sent"
+                try? await Task.sleep(for: .milliseconds(1200))
+                if captureFeedback == "Capture sent" {
+                    captureFeedback = nil
+                }
+            } catch {
+                captureFeedback = nil
+                errorMessage = error.localizedDescription
+            }
+            isCaptureRequesting = false
+        }
+    }
+
+    private func endSession() {
+        Task {
+            do {
+                try await services.roomRepository.endSession(roomCode: roomCode)
+                cancelFirstFrameRetry()
+                services.webRtcSession.stop()
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -2834,7 +2973,7 @@ struct WaitingForApprovalScreen: View {
         let point = CGPoint(x: x, y: y)
         focusReticlePoint = point
         Task {
-            try? await Task.sleep(for: .seconds(1))
+            try? await Task.sleep(for: .milliseconds(1600))
             if focusReticlePoint == point {
                 focusReticlePoint = nil
             }
