@@ -20,6 +20,28 @@ enum RoomStatus: String, Codable, Sendable {
     case ended
 }
 
+enum StreamQualityMode: String, CaseIterable, Codable, Sendable {
+    case lowLatency = "low_latency"
+    case balanced
+    case quality
+
+    var label: String {
+        switch self {
+        case .lowLatency: return "Low Latency"
+        case .balanced: return "Balanced"
+        case .quality: return "Quality"
+        }
+    }
+
+    var next: StreamQualityMode {
+        switch self {
+        case .lowLatency: return .balanced
+        case .balanced: return .quality
+        case .quality: return .lowLatency
+        }
+    }
+}
+
 struct CaptureRequest: Codable, Equatable, Sendable {
     var id: String
     var type: String
@@ -64,6 +86,7 @@ struct RoomDocument: Codable, Equatable, Sendable {
     var exposureMinIndex: Int
     var exposureMaxIndex: Int
     var exposureIndex: Int
+    var streamQualityMode: StreamQualityMode
     var rtcSessionId: String?
     var sessionVersion: Int
     var previewWidth: Int
@@ -102,6 +125,7 @@ struct RoomDocument: Codable, Equatable, Sendable {
             exposureMinIndex: 0,
             exposureMaxIndex: 0,
             exposureIndex: 0,
+            streamQualityMode: .balanced,
             rtcSessionId: nil,
             sessionVersion: Int(Date().timeIntervalSince1970 * 1000),
             previewWidth: 0,
@@ -133,6 +157,7 @@ protocol RoomRepository: Sendable {
     func updateAspectRatioMode(roomCode: String, aspectRatioMode: String) async throws
     func updateFocusRequest(roomCode: String, x: Double, y: Double, requestId: Int, lockEnabled: Bool) async throws
     func updateExposureIndex(roomCode: String, exposureIndex: Int) async throws
+    func updateStreamQualityMode(roomCode: String, mode: StreamQualityMode) async throws
     func requestCapture(roomCode: String) async throws
     func setOffer(_ sdp: String, roomCode: String, rtcSessionId: String) async throws
     func setAnswer(_ sdp: String, roomCode: String, rtcSessionId: String) async throws

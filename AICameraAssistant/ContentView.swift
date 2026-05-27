@@ -97,6 +97,10 @@ actor LocalRoomRepository: RoomRepository {
         try update(roomCode: roomCode) { $0.exposureIndex = min(8, max(-8, exposureIndex)) }
     }
 
+    func updateStreamQualityMode(roomCode: String, mode: StreamQualityMode) async throws {
+        try update(roomCode: roomCode) { $0.streamQualityMode = mode }
+    }
+
     func requestCapture(roomCode: String) async throws {
         try update(roomCode: roomCode) { $0.captureRequest = .new() }
     }
@@ -274,6 +278,10 @@ actor FirestoreRoomRepository: RoomRepository {
 
     func updateExposureIndex(roomCode: String, exposureIndex: Int) async throws {
         try await update(roomCode: roomCode, values: ["exposureIndex": min(8, max(-8, exposureIndex))])
+    }
+
+    func updateStreamQualityMode(roomCode: String, mode: StreamQualityMode) async throws {
+        try await update(roomCode: roomCode, values: ["streamQualityMode": mode.rawValue])
     }
 
     func requestCapture(roomCode: String) async throws {
@@ -500,6 +508,7 @@ actor FirestoreRoomRepository: RoomRepository {
             "exposureMinIndex": .integer(room.exposureMinIndex),
             "exposureMaxIndex": .integer(room.exposureMaxIndex),
             "exposureIndex": .integer(room.exposureIndex),
+            "streamQualityMode": .string(room.streamQualityMode.rawValue),
             "previewWidth": .integer(room.previewWidth),
             "previewHeight": .integer(room.previewHeight),
             "sessionVersion": .integer(room.sessionVersion),
@@ -564,6 +573,7 @@ actor FirestoreRoomRepository: RoomRepository {
             exposureMinIndex: data["exposureMinIndex"]?.integerNumberValue ?? 0,
             exposureMaxIndex: data["exposureMaxIndex"]?.integerNumberValue ?? 0,
             exposureIndex: data["exposureIndex"]?.integerNumberValue ?? 0,
+            streamQualityMode: StreamQualityMode(rawValue: data["streamQualityMode"]?.stringValue ?? "") ?? .balanced,
             rtcSessionId: data["rtcSessionId"]?.stringValue,
             sessionVersion: data["sessionVersion"]?.integerNumberValue ?? 0,
             previewWidth: data["previewWidth"]?.integerNumberValue ?? 0,
@@ -831,6 +841,10 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
         try await update(roomCode: roomCode, values: ["exposureIndex": min(8, max(-8, exposureIndex))])
     }
 
+    func updateStreamQualityMode(roomCode: String, mode: StreamQualityMode) async throws {
+        try await update(roomCode: roomCode, values: ["streamQualityMode": mode.rawValue])
+    }
+
     func requestCapture(roomCode: String) async throws {
         let request = CaptureRequest.new()
         try await update(roomCode: roomCode, values: [
@@ -943,6 +957,7 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
             "exposureMinIndex": room.exposureMinIndex,
             "exposureMaxIndex": room.exposureMaxIndex,
             "exposureIndex": room.exposureIndex,
+            "streamQualityMode": room.streamQualityMode.rawValue,
             "previewWidth": room.previewWidth,
             "previewHeight": room.previewHeight,
             "sessionVersion": room.sessionVersion,
@@ -991,6 +1006,7 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
             exposureMinIndex: data["exposureMinIndex"] as? Int ?? 0,
             exposureMaxIndex: data["exposureMaxIndex"] as? Int ?? 0,
             exposureIndex: data["exposureIndex"] as? Int ?? 0,
+            streamQualityMode: StreamQualityMode(rawValue: data["streamQualityMode"] as? String ?? "") ?? .balanced,
             rtcSessionId: data["rtcSessionId"] as? String,
             sessionVersion: data["sessionVersion"] as? Int ?? 0,
             previewWidth: data["previewWidth"] as? Int ?? 0,
@@ -1057,6 +1073,10 @@ enum WebRtcConnectionState: String {
 @MainActor
 final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManaging {
     @Published private(set) var state: WebRtcConnectionState = .idle
+    @Published private(set) var streamQualityMode: StreamQualityMode = .balanced
+    @Published private(set) var decodedVideoFrameCount = 0
+    @Published private(set) var reconnectCount = 0
+    @Published private(set) var iceConnectionStateDescription = "idle"
     #if canImport(WebRTC)
     @Published private(set) var remoteVideoTrack: RTCVideoTrack?
     @Published private(set) var localVideoTrack: RTCVideoTrack?
@@ -1064,6 +1084,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     private var factory: RTCPeerConnectionFactory?
     private var peerConnection: RTCPeerConnection?
     private var cameraCapturer: RTCCameraVideoCapturer?
+    private var videoSender: RTCRtpSender?
     private var role: WebRtcRole = .host
     private var roomCode: String?
     private var rtcSessionId: String?
@@ -1148,6 +1169,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         videoWatchdogTask = nil
         cameraCapturer?.stopCapture()
         cameraCapturer = nil
+        videoSender = nil
         activeCaptureDevice = nil
         activeExposureIndex = 0
         localVideoTrack = nil
@@ -1158,6 +1180,16 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         rtcSessionId = nil
         #endif
         state = .idle
+        iceConnectionStateDescription = "idle"
+    }
+
+    func applyStreamQualityMode(_ mode: StreamQualityMode) {
+        streamQualityMode = mode
+        #if canImport(WebRTC)
+        if let videoSender {
+            configureVideoSender(videoSender)
+        }
+        #endif
     }
 
     func applyCameraControls(lensFacing: LensFacing, zoomLevel: Double, flashEnabled: Bool) {
@@ -1269,6 +1301,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         let capturer = RTCCameraVideoCapturer(delegate: videoSource)
         let videoTrack = factory.videoTrack(with: videoSource, trackId: "camera-video")
         if let sender = peerConnection.add(videoTrack, streamIds: ["camera-stream"]) {
+            videoSender = sender
             configureVideoSender(sender)
         }
 
@@ -1284,18 +1317,19 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
             throw WebRtcSessionError.cameraUnavailable
         }
         let formats = RTCCameraVideoCapturer.supportedFormats(for: device)
+        let profile = streamQualityMode.webRtcProfile
         let preferredFormats = formats.sorted { lhs, rhs in
             let lhsSize = CMVideoFormatDescriptionGetDimensions(lhs.formatDescription)
             let rhsSize = CMVideoFormatDescriptionGetDimensions(rhs.formatDescription)
-            let lhsDistance = abs(Int(lhsSize.width) - 640) + abs(Int(lhsSize.height) - 360)
-            let rhsDistance = abs(Int(rhsSize.width) - 640) + abs(Int(rhsSize.height) - 360)
+            let lhsDistance = abs(Int(lhsSize.width) - profile.width) + abs(Int(lhsSize.height) - profile.height)
+            let rhsDistance = abs(Int(rhsSize.width) - profile.width) + abs(Int(rhsSize.height) - profile.height)
             return lhsDistance < rhsDistance
         }
         guard let format = preferredFormats.first else {
             throw WebRtcSessionError.cameraUnavailable
         }
-        let supportedFPS = format.videoSupportedFrameRateRanges.map { Int($0.maxFrameRate) }.max() ?? 10
-        capturer.startCapture(with: device, format: format, fps: min(supportedFPS, 10))
+        let supportedFPS = format.videoSupportedFrameRateRanges.map { Int($0.maxFrameRate) }.max() ?? profile.fps
+        capturer.startCapture(with: device, format: format, fps: min(supportedFPS, profile.fps))
         activeCaptureDevice = device
         applyDeviceControls(zoomLevel: activeZoomLevel)
         applyExposureOnDevice(device, exposureIndex: activeExposureIndex)
@@ -1327,10 +1361,11 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
 
     private func configureVideoSender(_ sender: RTCRtpSender) {
         let parameters = sender.parameters
+        let profile = streamQualityMode.webRtcProfile
         parameters.encodings.forEach { encoding in
-            encoding.minBitrateBps = NSNumber(value: 90_000)
-            encoding.maxBitrateBps = NSNumber(value: 650_000)
-            encoding.maxFramerate = NSNumber(value: 10)
+            encoding.minBitrateBps = NSNumber(value: profile.minBitrate)
+            encoding.maxBitrateBps = NSNumber(value: profile.maxBitrate)
+            encoding.maxFramerate = NSNumber(value: profile.fps)
         }
         sender.parameters = parameters
     }
@@ -1429,6 +1464,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
                 } else {
                     stalledChecks = 0
                     lastDecodedFrames = decodedFrames
+                    self.decodedVideoFrameCount = decodedFrames
                 }
 
                 if stalledChecks >= 2, let roomCode = self.roomCode, let repository = self.repository {
@@ -1440,6 +1476,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     }
 
     private func restartController(roomCode: String, repository: any RoomRepository) async {
+        reconnectCount += 1
         stop()
         try? await Task.sleep(for: .milliseconds(400))
         await startController(roomCode: roomCode, repository: repository)
@@ -1479,6 +1516,43 @@ enum WebRtcSessionError: Error {
 }
 
 #if canImport(WebRTC)
+private struct WebRtcStreamProfile {
+    let width: Int
+    let height: Int
+    let fps: Int
+    let minBitrate: Int
+    let maxBitrate: Int
+}
+
+private extension StreamQualityMode {
+    var webRtcProfile: WebRtcStreamProfile {
+        switch self {
+        case .lowLatency:
+            return WebRtcStreamProfile(width: 480, height: 270, fps: 10, minBitrate: 70_000, maxBitrate: 420_000)
+        case .balanced:
+            return WebRtcStreamProfile(width: 640, height: 360, fps: 10, minBitrate: 90_000, maxBitrate: 650_000)
+        case .quality:
+            return WebRtcStreamProfile(width: 960, height: 540, fps: 15, minBitrate: 250_000, maxBitrate: 1_200_000)
+        }
+    }
+}
+
+private extension RTCIceConnectionState {
+    var diagnosticDescription: String {
+        switch self {
+        case .new: return "new"
+        case .checking: return "checking"
+        case .connected: return "connected"
+        case .completed: return "completed"
+        case .failed: return "failed"
+        case .disconnected: return "disconnected"
+        case .closed: return "closed"
+        case .count: return "count"
+        @unknown default: return "unknown"
+        }
+    }
+}
+
 extension WebRtcSessionManager: RTCPeerConnectionDelegate {
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {}
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {
@@ -1492,7 +1566,9 @@ extension WebRtcSessionManager: RTCPeerConnectionDelegate {
     }
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
     nonisolated func peerConnectionShouldNegotiate(_ peerConnection: RTCPeerConnection) {}
-    nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {}
+    nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceConnectionState) {
+        Task { @MainActor in self.iceConnectionStateDescription = newState.diagnosticDescription }
+    }
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange newState: RTCIceGatheringState) {}
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didRemove candidates: [RTCIceCandidate]) {}
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {}
@@ -2140,9 +2216,16 @@ struct CameraHostScreen: View {
     }
 
     private var topBar: some View {
-        HStack {
+        HStack(alignment: .top) {
             CameraStatusPill(primary: "Room \(roomCode)", secondary: statusText)
             Spacer()
+            StreamDiagnosticsView(
+                state: services.webRtcSession.state,
+                qualityMode: room?.streamQualityMode ?? services.webRtcSession.streamQualityMode,
+                iceState: services.webRtcSession.iceConnectionStateDescription,
+                decodedFrames: services.webRtcSession.decodedVideoFrameCount,
+                reconnectCount: services.webRtcSession.reconnectCount
+            )
         }
     }
 
@@ -2167,6 +2250,20 @@ struct CameraHostScreen: View {
 
             CameraCircleButton(systemName: "aspectratio") {
                 updateAspectRatioMode((room?.aspectRatioMode ?? "full").nextCameraAspectRatioMode)
+            }
+
+            CameraCircleButton(
+                systemName: "speedometer",
+                isSelected: (room?.streamQualityMode ?? .balanced) != .balanced
+            ) {
+                updateStreamQualityMode((room?.streamQualityMode ?? .balanced).next)
+            }
+
+            CameraCircleButton(
+                systemName: "speedometer",
+                isSelected: (room?.streamQualityMode ?? .balanced) != .balanced
+            ) {
+                updateStreamQualityMode((room?.streamQualityMode ?? .balanced).next)
             }
         }
         .padding(.vertical, 10)
@@ -2252,6 +2349,7 @@ struct CameraHostScreen: View {
         do {
             for try await nextRoom in await services.roomRepository.observeRoom(roomCode: roomCode) {
                 room = nextRoom
+                services.webRtcSession.applyStreamQualityMode(nextRoom.streamQualityMode)
                 if services.webRtcSession.state == .idle {
                     camera.apply(lensFacing: nextRoom.lensFacing, zoomLevel: nextRoom.zoomLevel, flashEnabled: nextRoom.flashEnabled)
                     camera.applyExposureIndex(nextRoom.exposureIndex)
@@ -2366,6 +2464,11 @@ struct CameraHostScreen: View {
 
     private func updateAspectRatioMode(_ mode: String) {
         Task { try? await services.roomRepository.updateAspectRatioMode(roomCode: roomCode, aspectRatioMode: mode) }
+    }
+
+    private func updateStreamQualityMode(_ mode: StreamQualityMode) {
+        services.webRtcSession.applyStreamQualityMode(mode)
+        Task { try? await services.roomRepository.updateStreamQualityMode(roomCode: roomCode, mode: mode) }
     }
 }
 
@@ -2485,9 +2588,16 @@ struct WaitingForApprovalScreen: View {
     }
 
     private var controllerTopBar: some View {
-        HStack {
+        HStack(alignment: .top) {
             CameraStatusPill(primary: "Room \(roomCode)", secondary: statusText)
             Spacer()
+            StreamDiagnosticsView(
+                state: services.webRtcSession.state,
+                qualityMode: room?.streamQualityMode ?? services.webRtcSession.streamQualityMode,
+                iceState: services.webRtcSession.iceConnectionStateDescription,
+                decodedFrames: services.webRtcSession.decodedVideoFrameCount,
+                reconnectCount: services.webRtcSession.reconnectCount
+            )
         }
     }
 
@@ -2632,6 +2742,7 @@ struct WaitingForApprovalScreen: View {
         do {
             for try await nextRoom in await services.roomRepository.observeRoom(roomCode: roomCode) {
                 room = nextRoom
+                services.webRtcSession.applyStreamQualityMode(nextRoom.streamQualityMode)
                 lensFacing = nextRoom.lensFacing
                 zoomLevel = nextRoom.zoomLevel
                 flashEnabled = nextRoom.flashEnabled
@@ -2694,6 +2805,17 @@ struct WaitingForApprovalScreen: View {
         Task {
             do {
                 try await services.roomRepository.updateAspectRatioMode(roomCode: roomCode, aspectRatioMode: mode)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func updateStreamQualityMode(_ mode: StreamQualityMode) {
+        services.webRtcSession.applyStreamQualityMode(mode)
+        Task {
+            do {
+                try await services.roomRepository.updateStreamQualityMode(roomCode: roomCode, mode: mode)
             } catch {
                 errorMessage = error.localizedDescription
             }
