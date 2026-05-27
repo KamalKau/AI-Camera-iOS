@@ -2258,13 +2258,6 @@ struct CameraHostScreen: View {
             ) {
                 updateStreamQualityMode((room?.streamQualityMode ?? .balanced).next)
             }
-
-            CameraCircleButton(
-                systemName: "speedometer",
-                isSelected: (room?.streamQualityMode ?? .balanced) != .balanced
-            ) {
-                updateStreamQualityMode((room?.streamQualityMode ?? .balanced).next)
-            }
         }
         .padding(.vertical, 10)
     }
@@ -2691,6 +2684,13 @@ struct WaitingForApprovalScreen: View {
 
             CameraCircleButton(systemName: "aspectratio") {
                 updateAspectRatioMode((room?.aspectRatioMode ?? "full").nextCameraAspectRatioMode)
+            }
+
+            CameraCircleButton(
+                systemName: "speedometer",
+                isSelected: (room?.streamQualityMode ?? .balanced) != .balanced
+            ) {
+                updateStreamQualityMode((room?.streamQualityMode ?? .balanced).next)
             }
         }
         .padding(.vertical, 10)
