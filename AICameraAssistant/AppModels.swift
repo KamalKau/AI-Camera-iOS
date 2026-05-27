@@ -138,11 +138,13 @@ protocol RoomRepository: Sendable {
     func denyController(roomCode: String) async throws
     func endSession(roomCode: String) async throws
     func updateControls(roomCode: String, lensFacing: LensFacing, zoomLevel: Double, flashEnabled: Bool) async throws
+    func updateCameraMode(roomCode: String, cameraMode: String) async throws
     func updateGridEnabled(roomCode: String, gridEnabled: Bool) async throws
     func updateAspectRatioMode(roomCode: String, aspectRatioMode: String) async throws
     func updateFocusRequest(roomCode: String, x: Double, y: Double, requestId: Int, lockEnabled: Bool) async throws
     func updateExposureIndex(roomCode: String, exposureIndex: Int) async throws
-    func requestCapture(roomCode: String) async throws
+    func requestCapture(roomCode: String, type: String) async throws
+    func resetCaptureRequest(roomCode: String) async throws
     func setOffer(_ sdp: String, roomCode: String, rtcSessionId: String) async throws
     func setAnswer(_ sdp: String, roomCode: String, rtcSessionId: String) async throws
     func addCameraCandidate(_ candidate: IceCandidatePayload, roomCode: String, rtcSessionId: String) async throws
