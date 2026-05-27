@@ -142,6 +142,7 @@ protocol RoomRepository: Sendable {
     func updateGridEnabled(roomCode: String, gridEnabled: Bool) async throws
     func updateAspectRatioMode(roomCode: String, aspectRatioMode: String) async throws
     func updateFocusRequest(roomCode: String, x: Double, y: Double, requestId: Int, lockEnabled: Bool) async throws
+    func updateExposureIndex(roomCode: String, exposureIndex: Int) async throws
     func requestCapture(roomCode: String) async throws
     func setOffer(_ sdp: String, roomCode: String, rtcSessionId: String) async throws
     func setAnswer(_ sdp: String, roomCode: String, rtcSessionId: String) async throws
@@ -238,6 +239,10 @@ actor LocalRoomRepository: RoomRepository {
             room.focusRequestId = requestId
             room.focusLockEnabled = lockEnabled
         }
+    }
+
+    func updateExposureIndex(roomCode: String, exposureIndex: Int) async throws {
+        try update(roomCode: roomCode) { $0.exposureIndex = min(8, max(-8, exposureIndex)) }
     }
 
     func requestCapture(roomCode: String) async throws {
@@ -413,6 +418,10 @@ actor FirestoreRoomRepository: RoomRepository {
             "focusRequestId": requestId,
             "focusLockEnabled": lockEnabled
         ])
+    }
+
+    func updateExposureIndex(roomCode: String, exposureIndex: Int) async throws {
+        try await update(roomCode: roomCode, values: ["exposureIndex": min(8, max(-8, exposureIndex))])
     }
 
     func requestCapture(roomCode: String) async throws {
@@ -999,6 +1008,10 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
         ])
     }
 
+    func updateExposureIndex(roomCode: String, exposureIndex: Int) async throws {
+        try await update(roomCode: roomCode, values: ["exposureIndex": min(8, max(-8, exposureIndex))])
+    }
+
     func requestCapture(roomCode: String) async throws {
         let request = CaptureRequest.new()
         try await update(roomCode: roomCode, values: [
@@ -1216,6 +1229,7 @@ protocol WebRtcSessionManaging: AnyObject {
 enum WebRtcConnectionState: String {
     case idle
     case connecting
+    case waitingForVideo
     case connected
     case unavailable
     case failed
@@ -1237,11 +1251,13 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     private var repository: (any RoomRepository)?
     private var signalingTask: Task<Void, Never>?
     private var candidatePollingTask: Task<Void, Never>?
+    private var videoWatchdogTask: Task<Void, Never>?
     private var appliedRemoteCandidateIDs = Set<String>()
     private var activeCaptureDevice: AVCaptureDevice?
     private var activeLensFacing: LensFacing = .back
     private var activeZoomLevel = 1.0
     private var activeFlashEnabled = false
+    private var activeExposureIndex = 0
     private var isRestartingCapture = false
     #endif
 
@@ -1286,6 +1302,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         self.repository = repository
         let rtcSessionId = UUID().uuidString
         self.rtcSessionId = rtcSessionId
+        self.remoteVideoTrack = nil
 
         do {
             let peerConnection = try makePeerConnection()
@@ -1308,9 +1325,12 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         signalingTask = nil
         candidatePollingTask?.cancel()
         candidatePollingTask = nil
+        videoWatchdogTask?.cancel()
+        videoWatchdogTask = nil
         cameraCapturer?.stopCapture()
         cameraCapturer = nil
         activeCaptureDevice = nil
+        activeExposureIndex = 0
         localVideoTrack = nil
         remoteVideoTrack = nil
         peerConnection?.close()
@@ -1364,10 +1384,23 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
                 device.exposurePointOfInterest = point
                 device.exposureMode = lockEnabled ? .locked : .continuousAutoExposure
             }
+            let targetBias = Float(activeExposureIndex) / 2.0
+            let clampedBias = min(device.maxExposureTargetBias, max(device.minExposureTargetBias, targetBias))
+            device.setExposureTargetBias(clampedBias, completionHandler: nil)
             device.unlockForConfiguration()
         } catch {
             device.unlockForConfiguration()
         }
+        #endif
+    }
+
+    func applyExposureIndex(_ exposureIndex: Int) {
+        #if canImport(WebRTC)
+        let clampedIndex = min(8, max(-8, exposureIndex))
+        guard activeExposureIndex != clampedIndex else { return }
+        activeExposureIndex = clampedIndex
+        guard role == .host, let device = activeCaptureDevice else { return }
+        applyExposureOnDevice(device, exposureIndex: clampedIndex)
         #endif
     }
 
@@ -1399,15 +1432,10 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         guard let factory else { throw WebRtcSessionError.factoryUnavailable }
         let configuration = RTCConfiguration()
         configuration.sdpSemantics = .unifiedPlan
-        configuration.continualGatheringPolicy = .gatherContinually
+        configuration.continualGatheringPolicy = .gatherOnce
         configuration.iceServers = [
             RTCIceServer(urlStrings: ["stun:stun.l.google.com:19302"]),
-            RTCIceServer(urlStrings: ["stun:stun1.l.google.com:19302"]),
-            RTCIceServer(urlStrings: ["stun:stun2.l.google.com:19302"]),
-            RTCIceServer(urlStrings: ["stun:stun3.l.google.com:19302"]),
-            RTCIceServer(urlStrings: ["stun:stun4.l.google.com:19302"]),
-            RTCIceServer(urlStrings: ["turn:openrelay.metered.ca:80?transport=udp"], username: "openrelayproject", credential: "openrelayproject"),
-            RTCIceServer(urlStrings: ["turn:openrelay.metered.ca:443?transport=tcp"], username: "openrelayproject", credential: "openrelayproject")
+            RTCIceServer(urlStrings: ["stun:stun1.l.google.com:19302"])
         ]
         let constraints = RTCMediaConstraints(mandatoryConstraints: nil, optionalConstraints: nil)
         guard let peerConnection = factory.peerConnection(with: configuration, constraints: constraints, delegate: self) else {
@@ -1447,10 +1475,11 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         guard let format = preferredFormats.first else {
             throw WebRtcSessionError.cameraUnavailable
         }
-        let supportedFPS = format.videoSupportedFrameRateRanges.map { Int($0.maxFrameRate) }.max() ?? 15
-        capturer.startCapture(with: device, format: format, fps: min(supportedFPS, 15))
+        let supportedFPS = format.videoSupportedFrameRateRanges.map { Int($0.maxFrameRate) }.max() ?? 10
+        capturer.startCapture(with: device, format: format, fps: min(supportedFPS, 10))
         activeCaptureDevice = device
         applyDeviceControls(zoomLevel: activeZoomLevel)
+        applyExposureOnDevice(device, exposureIndex: activeExposureIndex)
     }
 
     private func applyDeviceControls(zoomLevel: Double) {
@@ -1465,12 +1494,24 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         }
     }
 
+    private func applyExposureOnDevice(_ device: AVCaptureDevice, exposureIndex: Int) {
+        do {
+            try device.lockForConfiguration()
+            let targetBias = Float(exposureIndex) / 2.0
+            let clampedBias = min(device.maxExposureTargetBias, max(device.minExposureTargetBias, targetBias))
+            device.setExposureTargetBias(clampedBias, completionHandler: nil)
+            device.unlockForConfiguration()
+        } catch {
+            device.unlockForConfiguration()
+        }
+    }
+
     private func configureVideoSender(_ sender: RTCRtpSender) {
         let parameters = sender.parameters
         parameters.encodings.forEach { encoding in
-            encoding.minBitrateBps = NSNumber(value: 300_000)
-            encoding.maxBitrateBps = NSNumber(value: 850_000)
-            encoding.maxFramerate = NSNumber(value: 15)
+            encoding.minBitrateBps = NSNumber(value: 180_000)
+            encoding.maxBitrateBps = NSNumber(value: 650_000)
+            encoding.maxFramerate = NSNumber(value: 10)
         }
         sender.parameters = parameters
     }
@@ -1521,15 +1562,13 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
                 let activeSessionId = room.rtcSessionId ?? rtcSessionId ?? UUID().uuidString
                 rtcSessionId = activeSessionId
                 try await repository.setAnswer(answer.sdp, roomCode: room.roomCode, rtcSessionId: activeSessionId)
-                state = .connected
+                state = .waitingForVideo
             }
 
             if role == .controller, peerConnection.remoteDescription == nil, let answerSdp = room.answer {
                 try await peerConnection.setRemoteDescriptionAsync(RTCSessionDescription(type: .answer, sdp: answerSdp))
-                state = .connected
+                state = remoteVideoTrack == nil ? .waitingForVideo : .connected
             }
-
-            await applyRemoteCandidates(roomCode: room.roomCode, repository: repository)
         } catch {
             state = .failed
         }
@@ -1548,6 +1587,59 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
             }
         } catch {
             // Candidate polling is best-effort; room polling handles fatal signaling failures.
+        }
+    }
+
+    private func startVideoWatchdog() {
+        guard role == .controller else { return }
+        videoWatchdogTask?.cancel()
+        videoWatchdogTask = Task { [weak self] in
+            var lastDecodedFrames = -1
+            var stalledChecks = 0
+
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3))
+                guard let self, self.role == .controller, self.state == .connected else { continue }
+                guard let decodedFrames = await self.decodedVideoFrames() else { continue }
+
+                if decodedFrames <= lastDecodedFrames {
+                    stalledChecks += 1
+                } else {
+                    stalledChecks = 0
+                    lastDecodedFrames = decodedFrames
+                }
+
+                if stalledChecks >= 2, let roomCode = self.roomCode, let repository = self.repository {
+                    await self.restartController(roomCode: roomCode, repository: repository)
+                    return
+                }
+            }
+        }
+    }
+
+    private func restartController(roomCode: String, repository: any RoomRepository) async {
+        stop()
+        try? await Task.sleep(for: .milliseconds(400))
+        await startController(roomCode: roomCode, repository: repository)
+    }
+
+    private func decodedVideoFrames() async -> Int? {
+        guard let peerConnection else { return nil }
+        return await withCheckedContinuation { continuation in
+            peerConnection.statistics { report in
+                let framesDecoded = report.statistics.values.compactMap { statistic -> Int? in
+                    guard statistic.type == "inbound-rtp" else { return nil }
+                    guard (statistic.values["kind"] as? String == "video") || (statistic.values["mediaType"] as? String == "video") else { return nil }
+                    if let value = statistic.values["framesDecoded"] as? NSNumber {
+                        return value.intValue
+                    }
+                    if let value = statistic.values["framesReceived"] as? NSNumber {
+                        return value.intValue
+                    }
+                    return nil
+                }.max()
+                continuation.resume(returning: framesDecoded)
+            }
         }
     }
     #endif
@@ -1569,7 +1661,11 @@ extension WebRtcSessionManager: RTCPeerConnectionDelegate {
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didChange stateChanged: RTCSignalingState) {}
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didAdd stream: RTCMediaStream) {
         if let track = stream.videoTracks.first {
-            Task { @MainActor in self.remoteVideoTrack = track }
+            Task { @MainActor in
+                self.remoteVideoTrack = track
+                self.state = .connected
+                self.startVideoWatchdog()
+            }
         }
     }
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didRemove stream: RTCMediaStream) {}
@@ -1580,7 +1676,11 @@ extension WebRtcSessionManager: RTCPeerConnectionDelegate {
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didOpen dataChannel: RTCDataChannel) {}
     nonisolated func peerConnection(_ peerConnection: RTCPeerConnection, didStartReceivingOn transceiver: RTCRtpTransceiver) {
         if let track = transceiver.receiver.track as? RTCVideoTrack {
-            Task { @MainActor in self.remoteVideoTrack = track }
+            Task { @MainActor in
+                self.remoteVideoTrack = track
+                self.state = .connected
+                self.startVideoWatchdog()
+            }
         }
     }
 
@@ -1743,6 +1843,17 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
+    func stopAndWait() async {
+        let session = session
+        await withCheckedContinuation { continuation in
+            sessionQueue.async {
+                if session.isRunning { session.stopRunning() }
+                Task { @MainActor in self.isRunning = false }
+                continuation.resume()
+            }
+        }
+    }
+
     func apply(lensFacing: LensFacing, zoomLevel: Double, flashEnabled: Bool) {
         let clampedZoom = max(1.0, min(8.0, zoomLevel))
         let shouldSwitchLens = self.lensFacing != lensFacing
@@ -1750,6 +1861,14 @@ final class CameraController: NSObject, ObservableObject {
         self.zoomLevel = clampedZoom
         self.flashEnabled = flashEnabled
         shouldSwitchLens ? configureAndStart() : applyZoom(clampedZoom)
+    }
+
+    func applyExposureIndex(_ exposureIndex: Int) {
+        let clampedIndex = min(8, max(-8, exposureIndex))
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.currentInput?.device else { return }
+            self.applyExposureOnQueue(clampedIndex, device: device)
+        }
     }
 
     func switchLens() {
@@ -1798,6 +1917,7 @@ final class CameraController: NSObject, ObservableObject {
                 }
                 session.commitConfiguration()
                 self.applyZoomOnQueue(selectedZoom, device: device)
+                self.applyExposureOnQueue(0, device: device)
                 if !session.isRunning { session.startRunning() }
                 Task { @MainActor in self.isRunning = session.isRunning }
             } catch {
@@ -1839,6 +1959,7 @@ final class CameraController: NSObject, ObservableObject {
                     }
                     session.commitConfiguration()
                     self.applyZoomOnQueue(selectedZoom, device: device)
+                    self.applyExposureOnQueue(0, device: device)
                     if !session.isRunning { session.startRunning() }
                     let running = session.isRunning
                     Task { @MainActor in self.isRunning = running }
@@ -1864,6 +1985,18 @@ final class CameraController: NSObject, ObservableObject {
             try device.lockForConfiguration()
             let maxZoom = min(device.activeFormat.videoMaxZoomFactor, 8.0)
             device.videoZoomFactor = max(1.0, min(maxZoom, zoomLevel))
+            device.unlockForConfiguration()
+        } catch {
+            device.unlockForConfiguration()
+        }
+    }
+
+    private func applyExposureOnQueue(_ exposureIndex: Int, device: AVCaptureDevice) {
+        do {
+            try device.lockForConfiguration()
+            let targetBias = Float(exposureIndex) / 2.0
+            let clampedBias = min(device.maxExposureTargetBias, max(device.minExposureTargetBias, targetBias))
+            device.setExposureTargetBias(clampedBias, completionHandler: nil)
             device.unlockForConfiguration()
         } catch {
             device.unlockForConfiguration()
@@ -2082,6 +2215,92 @@ struct FocusReticleView: View {
     }
 }
 
+struct FocusExposureOverlay: View {
+    let point: CGPoint
+    @Binding var exposureValue: Double
+    var isInteractive = false
+    var onExposureChanged: (Double) -> Void = { _ in }
+    var onExposureCommitted: (Double) -> Void = { _ in }
+
+    private let exposureTrackHeight: CGFloat = 142
+
+    var body: some View {
+        GeometryReader { geometry in
+            let x = point.x * geometry.size.width
+            let y = point.y * geometry.size.height
+            ZStack {
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(.yellow, lineWidth: 2)
+                    .frame(width: 72, height: 72)
+                    .position(x: x, y: y)
+                    .allowsHitTesting(false)
+
+                exposureControl
+                    .allowsHitTesting(isInteractive)
+                    .position(
+                        x: min(max(x + 58, 28), geometry.size.width - 28),
+                        y: min(max(y, exposureTrackHeight / 2 + 26), geometry.size.height - exposureTrackHeight / 2 - 26)
+                    )
+            }
+        }
+    }
+
+    private var exposureControl: some View {
+        VStack(spacing: 7) {
+            Image(systemName: "sun.max")
+                .font(.system(size: 17, weight: .medium))
+                .foregroundStyle(.yellow)
+
+            ZStack {
+                Capsule()
+                    .fill(.yellow.opacity(0.9))
+                    .frame(width: 2, height: exposureTrackHeight)
+
+                Circle()
+                    .fill(.yellow)
+                    .frame(width: 16, height: 16)
+                    .overlay(Circle().stroke(.black.opacity(0.35), lineWidth: 1))
+                    .shadow(color: .black.opacity(0.28), radius: 2, x: 0, y: 1)
+                    .offset(y: knobOffset)
+
+                Rectangle()
+                    .fill(.clear)
+                    .frame(width: 44, height: exposureTrackHeight)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { value in
+                                guard isInteractive else { return }
+                                updateExposure(from: value.location.y, shouldCommit: false)
+                            }
+                            .onEnded { value in
+                                guard isInteractive else { return }
+                                updateExposure(from: value.location.y, shouldCommit: true)
+                            }
+                    )
+            }
+        }
+        .frame(width: 44, height: exposureTrackHeight + 31)
+    }
+
+    private var knobOffset: CGFloat {
+        -CGFloat(exposureValue) * exposureTrackHeight / 2
+    }
+
+    private func updateExposure(from yLocation: CGFloat, shouldCommit: Bool) {
+        let clampedY = min(max(yLocation, 0), exposureTrackHeight)
+        let normalized = 1.0 - Double(clampedY / exposureTrackHeight)
+        let nextValue = min(max((normalized * 2.0) - 1.0, -1.0), 1.0)
+        if abs(nextValue - exposureValue) > 0.01 {
+            exposureValue = nextValue
+            onExposureChanged(nextValue)
+        }
+        if shouldCommit {
+            onExposureCommitted(nextValue)
+        }
+    }
+}
+
 extension String {
     var nextCameraAspectRatioMode: String {
         switch self {
@@ -2106,6 +2325,14 @@ extension String {
         default: return nil
         }
     }
+
+    var cameraPreviewAspectRatio: CGFloat {
+        switch self {
+        case "4:3": return 3.0 / 4.0
+        case "square": return 1.0
+        default: return 9.0 / 16.0
+        }
+    }
 }
 
 #if canImport(WebRTC)
@@ -2114,7 +2341,7 @@ struct RemoteVideoView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> RTCMTLVideoView {
         let view = RTCMTLVideoView()
-        view.videoContentMode = .scaleAspectFit
+        view.videoContentMode = .scaleAspectFill
         return view
     }
 
@@ -2277,7 +2504,9 @@ struct CameraHostScreen: View {
     @State private var lastHandledCaptureRequestId: String?
     @State private var isHandlingRemoteCapture = false
     @State private var lastHandledFocusRequestId = 0
+    @State private var lastAppliedExposureIndex: Int?
     @State private var focusReticlePoint: CGPoint?
+    @State private var exposureValue = 0.0
 
     var body: some View {
         ZStack {
@@ -2307,24 +2536,34 @@ struct CameraHostScreen: View {
     @ViewBuilder
     private var hostPreview: some View {
         ZStack {
-            #if canImport(WebRTC)
-            if let localVideoTrack = services.webRtcSession.localVideoTrack {
-                RemoteVideoView(track: localVideoTrack)
-            } else {
+            Color.black
+
+            ZStack {
+                #if canImport(WebRTC)
+                if let localVideoTrack = services.webRtcSession.localVideoTrack {
+                    RemoteVideoView(track: localVideoTrack)
+                } else {
+                    CameraPreviewView(session: camera.session)
+                }
+                #else
                 CameraPreviewView(session: camera.session)
+                #endif
             }
-            #else
-            CameraPreviewView(session: camera.session)
-            #endif
-            if room?.gridEnabled == true {
-                CameraGridOverlay()
+            .overlay {
+                if room?.gridEnabled == true {
+                    CameraGridOverlay()
+                }
             }
-            if let focusReticlePoint {
-                FocusReticleView(point: focusReticlePoint)
+            .overlay {
+                if let focusReticlePoint {
+                    FocusExposureOverlay(point: focusReticlePoint, exposureValue: $exposureValue)
+                }
             }
+            .aspectRatio((room?.aspectRatioMode ?? "full").cameraPreviewAspectRatio, contentMode: .fit)
+            .frame(maxWidth: .infinity)
+            .clipped()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black)
         .ignoresSafeArea()
     }
 
@@ -2443,13 +2682,16 @@ struct CameraHostScreen: View {
                 room = nextRoom
                 if services.webRtcSession.state == .idle {
                     camera.apply(lensFacing: nextRoom.lensFacing, zoomLevel: nextRoom.zoomLevel, flashEnabled: nextRoom.flashEnabled)
+                    camera.applyExposureIndex(nextRoom.exposureIndex)
                 } else {
                     services.webRtcSession.applyCameraControls(
                         lensFacing: nextRoom.lensFacing,
                         zoomLevel: nextRoom.zoomLevel,
                         flashEnabled: nextRoom.flashEnabled
                     )
+                    applyExposureIfNeeded(nextRoom.exposureIndex)
                 }
+                exposureValue = Double(nextRoom.exposureIndex) / 8.0
                 handleFocusRequest(nextRoom)
                 handleCaptureRequest(nextRoom.captureRequest)
             }
@@ -2504,14 +2746,19 @@ struct CameraHostScreen: View {
         }
     }
 
+    private func applyExposureIfNeeded(_ exposureIndex: Int) {
+        guard lastAppliedExposureIndex != exposureIndex else { return }
+        lastAppliedExposureIndex = exposureIndex
+        services.webRtcSession.applyExposureIndex(exposureIndex)
+    }
+
     private func updateApproval(approved: Bool) {
         Task {
             do {
                 if approved {
-                    try await services.roomRepository.approveController(roomCode: roomCode)
-                    camera.stop()
-                    try await Task.sleep(for: .milliseconds(250))
+                    await camera.stopAndWait()
                     await services.webRtcSession.startHost(roomCode: roomCode, repository: services.roomRepository)
+                    try await services.roomRepository.approveController(roomCode: roomCode)
                 } else {
                     try await services.roomRepository.denyController(roomCode: roomCode)
                 }
@@ -2547,6 +2794,8 @@ struct WaitingForApprovalScreen: View {
     @State private var errorMessage: String?
     @State private var zoomPublishTask: Task<Void, Never>?
     @State private var focusReticlePoint: CGPoint?
+    @State private var exposureValue = 0.0
+    @State private var exposurePublishTask: Task<Void, Never>?
 
     var body: some View {
         ZStack {
@@ -2575,41 +2824,64 @@ struct WaitingForApprovalScreen: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .task { await observeRoom() }
-        .onDisappear { zoomPublishTask?.cancel() }
+        .onDisappear {
+            zoomPublishTask?.cancel()
+            exposurePublishTask?.cancel()
+        }
     }
 
     private var previewSurface: some View {
         GeometryReader { geometry in
             ZStack {
-            Color.black
-            #if canImport(WebRTC)
-            if let remoteVideoTrack = services.webRtcSession.remoteVideoTrack {
-                RemoteVideoView(track: remoteVideoTrack)
-            } else {
-                previewStatusOverlay
-            }
-            #else
-            previewStatusOverlay
-            #endif
-                if room?.gridEnabled == true {
-                    CameraGridOverlay()
+                Color.black
+
+                ZStack {
+                    #if canImport(WebRTC)
+                    if let remoteVideoTrack = services.webRtcSession.remoteVideoTrack {
+                        RemoteVideoView(track: remoteVideoTrack)
+                    } else {
+                        previewStatusOverlay
+                    }
+                    #else
+                    previewStatusOverlay
+                    #endif
                 }
-                if let focusReticlePoint {
-                    FocusReticleView(point: focusReticlePoint)
+                .overlay {
+                    if room?.gridEnabled == true {
+                        CameraGridOverlay()
+                    }
                 }
+                .overlay {
+                    GeometryReader { previewGeometry in
+                        Color.clear
+                            .contentShape(Rectangle())
+                            .simultaneousGesture(
+                                DragGesture(minimumDistance: 0)
+                                    .onEnded { value in
+                                        guard room?.controllerApproved == true else { return }
+                                        let x = min(1.0, max(0.0, value.location.x / max(previewGeometry.size.width, 1)))
+                                        let y = min(1.0, max(0.0, value.location.y / max(previewGeometry.size.height, 1)))
+                                        sendFocusRequest(x: x, y: y)
+                                    }
+                            )
+                    }
+                }
+                .overlay {
+                    if let focusReticlePoint {
+                        FocusExposureOverlay(
+                            point: focusReticlePoint,
+                            exposureValue: $exposureValue,
+                            isInteractive: true,
+                            onExposureCommitted: publishExposureDebounced
+                        )
+                    }
+                }
+                .aspectRatio((room?.aspectRatioMode ?? "full").cameraPreviewAspectRatio, contentMode: .fit)
+                .frame(maxWidth: .infinity)
+                .clipped()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
-            .contentShape(Rectangle())
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onEnded { value in
-                        guard room?.controllerApproved == true else { return }
-                        let x = min(1.0, max(0.0, value.location.x / max(geometry.size.width, 1)))
-                        let y = min(1.0, max(0.0, value.location.y / max(geometry.size.height, 1)))
-                        sendFocusRequest(x: x, y: y)
-                    }
-            )
         }
     }
 
@@ -2656,7 +2928,9 @@ struct WaitingForApprovalScreen: View {
         case .unavailable:
             return "WebRTC package is not linked to this app target"
         case .connecting:
-            return "Starting live preview"
+            return "Connecting to camera"
+        case .waitingForVideo:
+            return "Waiting for camera video"
         case .connected:
             return "Waiting for remote video track"
         case .failed:
@@ -2774,6 +3048,7 @@ struct WaitingForApprovalScreen: View {
                 lensFacing = nextRoom.lensFacing
                 zoomLevel = nextRoom.zoomLevel
                 flashEnabled = nextRoom.flashEnabled
+                exposureValue = Double(nextRoom.exposureIndex) / 8.0
                 if nextRoom.controllerApproved {
                     await services.webRtcSession.startController(roomCode: roomCode, repository: services.roomRepository)
                 }
@@ -2857,6 +3132,22 @@ struct WaitingForApprovalScreen: View {
                 )
             } catch {
                 errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func publishExposureDebounced(_ value: Double) {
+        exposurePublishTask?.cancel()
+        exposurePublishTask = Task {
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            do {
+                try await services.roomRepository.updateExposureIndex(
+                    roomCode: roomCode,
+                    exposureIndex: Int((value * 8.0).rounded())
+                )
+            } catch {
+                await MainActor.run { errorMessage = error.localizedDescription }
             }
         }
     }
