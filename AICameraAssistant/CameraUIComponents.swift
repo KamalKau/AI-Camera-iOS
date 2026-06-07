@@ -7,22 +7,84 @@ import WebRTC
 
 struct CameraPreviewView: UIViewRepresentable {
     let session: AVCaptureSession
+    var lensFacing: LensFacing = .back
 
     func makeUIView(context: Context) -> PreviewContainerView {
         let view = PreviewContainerView()
         view.previewLayer.session = session
         view.previewLayer.videoGravity = .resizeAspectFill
+        view.lensFacing = lensFacing
+        view.updatePreviewConnection()
         return view
     }
 
     func updateUIView(_ uiView: PreviewContainerView, context: Context) {
         uiView.previewLayer.session = session
+        uiView.lensFacing = lensFacing
+        uiView.updatePreviewConnection()
     }
 }
 
 final class PreviewContainerView: UIView {
     override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
     var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+    var lensFacing: LensFacing = .back
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(deviceOrientationDidChange),
+            name: UIDevice.orientationDidChangeNotification,
+            object: nil
+        )
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        previewLayer.frame = bounds
+        updatePreviewConnection()
+    }
+
+    func updatePreviewConnection() {
+        guard let connection = previewLayer.connection else { return }
+        if connection.isVideoOrientationSupported {
+            connection.videoOrientation = AVCaptureVideoOrientation.currentPreviewOrientation(lensFacing: lensFacing)
+        }
+        if connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = lensFacing == .front
+        }
+    }
+
+    @objc private func deviceOrientationDidChange() {
+        updatePreviewConnection()
+    }
+}
+
+private extension AVCaptureVideoOrientation {
+    static func currentPreviewOrientation(lensFacing: LensFacing) -> AVCaptureVideoOrientation {
+        switch UIDevice.current.orientation {
+        case .landscapeLeft:
+            return .landscapeRight
+        case .landscapeRight:
+            return .landscapeLeft
+        case .portraitUpsideDown:
+            return .portraitUpsideDown
+        case .portrait:
+            return .portrait
+        default:
+            return .portrait
+        }
+    }
 }
 
 struct CameraCircleButton: View {
@@ -239,14 +301,20 @@ extension String {
 #if canImport(WebRTC)
 struct RemoteVideoView: UIViewRepresentable {
     let track: RTCVideoTrack?
+    var isMirrored = false
 
     func makeUIView(context: Context) -> RTCMTLVideoView {
         let view = RTCMTLVideoView()
         view.videoContentMode = .scaleAspectFill
+        view.transform = isMirrored ? CGAffineTransform(scaleX: -1, y: 1) : .identity
         return view
     }
 
     func updateUIView(_ uiView: RTCMTLVideoView, context: Context) {
+        UIView.performWithoutAnimation {
+            uiView.transform = isMirrored ? CGAffineTransform(scaleX: -1, y: 1) : .identity
+            uiView.layoutIfNeeded()
+        }
         context.coordinator.update(track: track, renderer: uiView)
     }
 

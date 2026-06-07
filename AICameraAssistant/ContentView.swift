@@ -1163,6 +1163,7 @@ enum WebRtcConnectionState: String {
 final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManaging {
     @Published private(set) var state: WebRtcConnectionState = .idle
     @Published private(set) var streamQualityMode: StreamQualityMode = .lowLatency
+    @Published private(set) var capturedLensFacing: LensFacing = .back
     @Published private(set) var decodedVideoFrameCount = 0
     @Published private(set) var reconnectCount = 0
     @Published private(set) var iceConnectionStateDescription = "idle"
@@ -1181,6 +1182,8 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     private var signalingTask: Task<Void, Never>?
     private var candidatePollingTask: Task<Void, Never>?
     private var videoWatchdogTask: Task<Void, Never>?
+    private var capturedLensCommitTask: Task<Void, Never>?
+    private var captureSwitchGeneration = 0
     private var appliedRemoteCandidateIDs = Set<String>()
     private var activeCaptureDevice: AVCaptureDevice?
     private var activeLensFacing: LensFacing = .back
@@ -1291,6 +1294,8 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         candidatePollingTask = nil
         videoWatchdogTask?.cancel()
         videoWatchdogTask = nil
+        capturedLensCommitTask?.cancel()
+        capturedLensCommitTask = nil
         if hostMovieOutput.isRecording { hostMovieOutput.stopRecording() }
         removeHostMovieOutput()
         cameraCapturer?.stopCapture()
@@ -1306,6 +1311,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         isHostVideoRecording = false
         pendingHostPhotoDelegates.removeAll()
         activeExposureIndex = 0
+        capturedLensFacing = .back
         localVideoTrack = nil
         remoteVideoTrack = nil
         peerConnection?.close()
@@ -1409,10 +1415,6 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
             completion(nil)
             return
         }
-        if let image = hostFrameCache.latestImage(lensFacing: activeLensFacing) {
-            completion(image)
-            return
-        }
         configureHostPhotoOutput(on: cameraCapturer)
         let settings = AVCapturePhotoSettings()
         settings.photoQualityPrioritization = .speed
@@ -1420,9 +1422,12 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
             settings.flashMode = activeFlashEnabled ? .on : .off
         }
         let uniqueID = Int64(settings.uniqueID)
-        let delegate = PhotoCaptureDelegate { [weak self] image in
+        let delegate = PhotoCaptureDelegate { [weak self, weak cameraCapturer] image in
             Task { @MainActor in
                 self?.pendingHostPhotoDelegates[uniqueID] = nil
+                if let cameraCapturer {
+                    self?.removeHostPhotoOutput(from: cameraCapturer)
+                }
                 completion(image)
             }
         }
@@ -1498,8 +1503,6 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
                 videoSender = sender
                 configureVideoSender(sender)
             }
-            configureHostPhotoOutput(on: cameraCapturer)
-            configureHostVideoFrameOutput(on: cameraCapturer)
             return
         }
 
@@ -1518,8 +1521,6 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
 
         cameraCapturer = capturer
         localVideoTrack = videoTrack
-        configureHostPhotoOutput(on: capturer)
-        configureHostVideoFrameOutput(on: capturer)
         try startCapture(capturer, lensFacing: activeLensFacing)
     }
 
@@ -1528,6 +1529,14 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         guard !session.outputs.contains(hostPhotoOutput), session.canAddOutput(hostPhotoOutput) else { return }
         session.beginConfiguration()
         session.addOutput(hostPhotoOutput)
+        session.commitConfiguration()
+    }
+
+    private func removeHostPhotoOutput(from capturer: RTCCameraVideoCapturer) {
+        let session = capturer.captureSession
+        guard session.outputs.contains(hostPhotoOutput) else { return }
+        session.beginConfiguration()
+        session.removeOutput(hostPhotoOutput)
         session.commitConfiguration()
     }
 
@@ -1559,19 +1568,44 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     private func switchCapture(to lensFacing: LensFacing, completion: (() -> Void)? = nil) {
         guard let cameraCapturer, !isRestartingCapture else { return }
         activeLensFacing = lensFacing
+        activeCaptureDevice = nil
         isRestartingCapture = true
-        cameraCapturer.stopCapture { [weak self, weak cameraCapturer] in
-            Task { @MainActor in
-                guard let self, let cameraCapturer else { return }
-                defer { self.isRestartingCapture = false }
-                do {
-                    try self.startCapture(cameraCapturer, lensFacing: lensFacing)
-                    completion?()
-                } catch {
-                    self.state = .failed
-                    self.finalizeHostRecording(error: error)
+        captureSwitchGeneration += 1
+        let switchGeneration = captureSwitchGeneration
+        var didRestart = false
+
+        func restartIfNeeded() {
+            guard !didRestart, captureSwitchGeneration == switchGeneration else { return }
+            didRestart = true
+            do {
+                try startCapture(cameraCapturer, lensFacing: lensFacing, commitCapturedLensImmediately: false)
+                isRestartingCapture = false
+                capturedLensCommitTask?.cancel()
+                capturedLensCommitTask = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(450))
+                    guard !Task.isCancelled, captureSwitchGeneration == switchGeneration else { return }
+                    capturedLensFacing = lensFacing
                 }
+                completion?()
+            } catch {
+                isRestartingCapture = false
+                state = .failed
+                finalizeHostRecording(error: error)
             }
+        }
+
+        removeHostPhotoOutput(from: cameraCapturer)
+        cameraCapturer.stopCapture { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                restartIfNeeded()
+            }
+        }
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1200))
+            guard captureSwitchGeneration == switchGeneration, isRestartingCapture else { return }
+            restartIfNeeded()
         }
     }
 
@@ -1794,14 +1828,32 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         throw WebRtcSessionError.cameraUnavailable
     }
 
-    private func startCapture(_ capturer: RTCCameraVideoCapturer, lensFacing: LensFacing) throws {
+    private func startCapture(
+        _ capturer: RTCCameraVideoCapturer,
+        lensFacing: LensFacing,
+        commitCapturedLensImmediately: Bool = true
+    ) throws {
+        let device = try Self.startCaptureOnCapturer(capturer, lensFacing: lensFacing, profile: streamQualityMode.webRtcProfile)
+        activeCaptureDevice = device
+        activeLensFacing = lensFacing
+        if commitCapturedLensImmediately {
+            capturedLensFacing = lensFacing
+        }
+        applyDeviceControls(zoomLevel: activeZoomLevel)
+        applyExposureOnDevice(device, exposureIndex: activeExposureIndex)
+    }
+
+    private nonisolated static func startCaptureOnCapturer(
+        _ capturer: RTCCameraVideoCapturer,
+        lensFacing: LensFacing,
+        profile: WebRtcStreamProfile
+    ) throws -> AVCaptureDevice {
         let devices = RTCCameraVideoCapturer.captureDevices()
         let position: AVCaptureDevice.Position = lensFacing == .back ? .back : .front
         guard let device = devices.first(where: { $0.position == position }) ?? devices.first else {
             throw WebRtcSessionError.cameraUnavailable
         }
         let formats = RTCCameraVideoCapturer.supportedFormats(for: device)
-        let profile = streamQualityMode.webRtcProfile
         let preferredFormats = formats.sorted { lhs, rhs in
             let lhsSize = CMVideoFormatDescriptionGetDimensions(lhs.formatDescription)
             let rhsSize = CMVideoFormatDescriptionGetDimensions(rhs.formatDescription)
@@ -1814,9 +1866,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         }
         let supportedFPS = format.videoSupportedFrameRateRanges.map { Int($0.maxFrameRate) }.max() ?? profile.fps
         capturer.startCapture(with: device, format: format, fps: min(supportedFPS, profile.fps))
-        activeCaptureDevice = device
-        applyDeviceControls(zoomLevel: activeZoomLevel)
-        applyExposureOnDevice(device, exposureIndex: activeExposureIndex)
+        return device
     }
 
     private func applyDeviceControls(zoomLevel: Double) {
@@ -1955,11 +2005,11 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
             var stalledChecks = 0
 
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(3))
+                try? await Task.sleep(for: .seconds(1))
                 guard let self, self.role == .controller, self.state == .connected else { continue }
                 guard let decodedFrames = await self.decodedVideoFrames() else { continue }
 
-                if decodedFrames <= lastDecodedFrames {
+                if lastDecodedFrames >= 0, decodedFrames <= lastDecodedFrames {
                     stalledChecks += 1
                 } else {
                     stalledChecks = 0
@@ -1967,7 +2017,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
                     self.decodedVideoFrameCount = decodedFrames
                 }
 
-                if stalledChecks >= 6, let roomCode = self.roomCode, let repository = self.repository {
+                if stalledChecks >= 4, let roomCode = self.roomCode, let repository = self.repository {
                     await self.restartController(roomCode: roomCode, repository: repository)
                     return
                 }
@@ -2077,11 +2127,11 @@ private extension StreamQualityMode {
     var webRtcProfile: WebRtcStreamProfile {
         switch self {
         case .lowLatency:
-            return WebRtcStreamProfile(width: 480, height: 270, fps: 24, minBitrate: 180_000, maxBitrate: 650_000)
+            return WebRtcStreamProfile(width: 640, height: 360, fps: 20, minBitrate: 300_000, maxBitrate: 900_000)
         case .balanced:
-            return WebRtcStreamProfile(width: 640, height: 360, fps: 24, minBitrate: 300_000, maxBitrate: 1_000_000)
+            return WebRtcStreamProfile(width: 854, height: 480, fps: 20, minBitrate: 500_000, maxBitrate: 1_400_000)
         case .quality:
-            return WebRtcStreamProfile(width: 960, height: 540, fps: 24, minBitrate: 550_000, maxBitrate: 1_800_000)
+            return WebRtcStreamProfile(width: 1280, height: 720, fps: 20, minBitrate: 900_000, maxBitrate: 2_400_000)
         }
     }
 }
@@ -2833,6 +2883,11 @@ struct CameraHostScreen: View {
     @State private var focusReticlePoint: CGPoint?
     @State private var exposureValue = 0.0
     @State private var isPrewarmingHostStream = false
+    @State private var hostPreviewLensFacing: LensFacing = .back
+    @State private var hostPreviewLensTask: Task<Void, Never>?
+    @State private var hostPreviewLensTarget: LensFacing?
+    @State private var hostPreviewSwitching = false
+    @State private var hostPreviewSwitchTask: Task<Void, Never>?
 
     var body: some View {
         ZStack {
@@ -2857,6 +2912,8 @@ struct CameraHostScreen: View {
             await observeRoom()
         }
         .onDisappear {
+            hostPreviewLensTask?.cancel()
+            hostPreviewSwitchTask?.cancel()
             Task {
                 await services.webRtcSession.finishHostVideoRecordingBeforeTeardown()
                 camera.stop()
@@ -2871,14 +2928,29 @@ struct CameraHostScreen: View {
             Color.black
 
             ZStack {
+                let requestedLensFacing = room?.lensFacing ?? camera.lensFacing
+                let previewLensFacing = services.webRtcSession.localVideoTrack == nil ? requestedLensFacing : services.webRtcSession.capturedLensFacing
                 #if canImport(WebRTC)
                 if let localVideoTrack = services.webRtcSession.localVideoTrack {
-                    RemoteVideoView(track: localVideoTrack)
+                    let isSwitchingLens = hostPreviewSwitching
+                    RemoteVideoView(track: localVideoTrack, isMirrored: previewLensFacing == .front)
+                        .blur(radius: isSwitchingLens ? 16 : 0)
+                        .saturation(isSwitchingLens ? 0.65 : 1)
+                        .transaction { transaction in
+                            transaction.animation = nil
+                        }
+                        .overlay {
+                            if isSwitchingLens {
+                                CameraSwitchingOverlay()
+                            }
+                        }
                 } else {
-                    CameraPreviewView(session: camera.session)
+                    CameraPreviewView(session: camera.session, lensFacing: previewLensFacing)
+                        .id(previewLensFacing)
                 }
                 #else
-                CameraPreviewView(session: camera.session)
+                CameraPreviewView(session: camera.session, lensFacing: previewLensFacing)
+                    .id(previewLensFacing)
                 #endif
             }
             .overlay {
@@ -2909,8 +2981,7 @@ struct CameraHostScreen: View {
     private var hostToolRail: some View {
         VStack(spacing: 14) {
             CameraCircleButton(systemName: "arrow.triangle.2.circlepath.camera") {
-                camera.switchLens()
-                publishCurrentControls()
+                switchHostLens()
             }
 
             CameraCircleButton(
@@ -3018,6 +3089,8 @@ struct CameraHostScreen: View {
         do {
             for try await nextRoom in await services.roomRepository.observeRoom(roomCode: roomCode) {
                 room = nextRoom
+                hostPreviewLensTask?.cancel()
+                hostPreviewLensFacing = services.webRtcSession.capturedLensFacing
                 if nextRoom.status == .ended {
                     await returnToStart()
                     return
@@ -3046,6 +3119,34 @@ struct CameraHostScreen: View {
             }
         } catch {
             errorMessage = error.localizedDescription
+        }
+    }
+
+    private func switchHostLens() {
+        hostPreviewSwitchTask?.cancel()
+        hostPreviewSwitching = true
+        hostPreviewSwitchTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            camera.switchLens()
+            publishCurrentControls()
+            try? await Task.sleep(for: .milliseconds(1200))
+            guard !Task.isCancelled else { return }
+            hostPreviewLensFacing = services.webRtcSession.capturedLensFacing
+            hostPreviewSwitching = false
+            hostPreviewLensTarget = nil
+            hostPreviewSwitchTask = nil
+        }
+    }
+
+    private func scheduleHostPreviewLensFacing(_ lensFacing: LensFacing) {
+        guard hostPreviewLensTarget != lensFacing else { return }
+        hostPreviewLensTarget = lensFacing
+        hostPreviewLensTask?.cancel()
+        hostPreviewLensFacing = lensFacing
+        if hostPreviewSwitchTask == nil {
+            hostPreviewSwitching = false
+            hostPreviewLensTarget = nil
         }
     }
 
@@ -3173,6 +3274,19 @@ struct CameraHostScreen: View {
     }
 }
 
+private struct CameraSwitchingOverlay: View {
+    var body: some View {
+        ZStack {
+            Rectangle()
+                .fill(.thinMaterial)
+                .opacity(0.42)
+            Rectangle()
+                .fill(Color.black.opacity(0.18))
+        }
+        .allowsHitTesting(false)
+    }
+}
+
 struct WaitingForApprovalScreen: View {
     let roomCode: String
     @Binding var path: NavigationPath
@@ -3196,6 +3310,12 @@ struct WaitingForApprovalScreen: View {
     @State private var isSwitchingCameraDuringRecording = false
     @State private var captureFeedback: String?
     @State private var shutterFlashVisible = false
+    @State private var controllerPreviewLensFacing: LensFacing = .back
+    @State private var controllerPreviewLensTask: Task<Void, Never>?
+    @State private var controllerPreviewLensTarget: LensFacing?
+    @State private var controllerPreviewSwitching = false
+    @State private var controllerLensSwitchTask: Task<Void, Never>?
+    @State private var controllerPreviewSwitchStartFrameCount = 0
 
     var body: some View {
         ZStack {
@@ -3235,6 +3355,8 @@ struct WaitingForApprovalScreen: View {
             zoomPublishTask?.cancel()
             exposurePublishTask?.cancel()
             firstFrameRetryTask?.cancel()
+            controllerPreviewLensTask?.cancel()
+            controllerLensSwitchTask?.cancel()
             resetControllerSessionState()
             services.webRtcSession.stop()
         }
@@ -3248,7 +3370,18 @@ struct WaitingForApprovalScreen: View {
                 ZStack {
                     #if canImport(WebRTC)
                     if let remoteVideoTrack = services.webRtcSession.remoteVideoTrack {
-                        RemoteVideoView(track: remoteVideoTrack)
+                        let isSwitchingLens = controllerPreviewSwitching
+                        RemoteVideoView(track: remoteVideoTrack, isMirrored: controllerPreviewLensFacing == .front)
+                            .blur(radius: isSwitchingLens ? 16 : 0)
+                            .saturation(isSwitchingLens ? 0.65 : 1)
+                            .transaction { transaction in
+                                transaction.animation = nil
+                            }
+                            .overlay {
+                                if isSwitchingLens {
+                                    CameraSwitchingOverlay()
+                                }
+                            }
                     } else {
                         previewStatusOverlay
                     }
@@ -3500,7 +3633,16 @@ struct WaitingForApprovalScreen: View {
                     continue
                 }
                 services.webRtcSession.applyStreamQualityMode(nextRoom.streamQualityMode)
+                let shouldDelayPreviewLens = didPrewarmControllerStream && controllerPreviewLensFacing != nextRoom.lensFacing
                 lensFacing = nextRoom.lensFacing
+                if shouldDelayPreviewLens {
+                    scheduleControllerPreviewLensFacing(nextRoom.lensFacing)
+                } else {
+                    controllerPreviewLensTask?.cancel()
+                    controllerPreviewLensTarget = nil
+                    controllerPreviewLensFacing = nextRoom.lensFacing
+                    controllerPreviewSwitching = false
+                }
                 zoomLevel = nextRoom.zoomLevel
                 flashEnabled = nextRoom.flashEnabled
                 cameraMode = nextRoom.cameraMode
@@ -3518,6 +3660,41 @@ struct WaitingForApprovalScreen: View {
         }
     }
 
+    private func scheduleControllerPreviewLensFacing(_ lensFacing: LensFacing) {
+        guard controllerPreviewLensTarget != lensFacing else { return }
+        controllerPreviewLensTarget = lensFacing
+        controllerPreviewLensTask?.cancel()
+        controllerPreviewSwitchStartFrameCount = services.webRtcSession.decodedVideoFrameCount
+        controllerPreviewSwitching = true
+        controllerPreviewLensTask = Task { @MainActor in
+            await finishControllerPreviewSwitch(to: lensFacing, startFrameCount: controllerPreviewSwitchStartFrameCount)
+        }
+    }
+
+    private func finishControllerPreviewSwitch(to lensFacing: LensFacing, startFrameCount: Int) async {
+        let minimumDelayMilliseconds = 700
+        let maximumDelayMilliseconds = 2200
+        var elapsedMilliseconds = 0
+
+        while elapsedMilliseconds < minimumDelayMilliseconds {
+            try? await Task.sleep(for: .milliseconds(100))
+            guard !Task.isCancelled else { return }
+            elapsedMilliseconds += 100
+        }
+
+        while services.webRtcSession.decodedVideoFrameCount <= startFrameCount && elapsedMilliseconds < maximumDelayMilliseconds {
+            try? await Task.sleep(for: .milliseconds(100))
+            guard !Task.isCancelled else { return }
+            elapsedMilliseconds += 100
+        }
+
+        controllerPreviewLensFacing = lensFacing
+        try? await Task.sleep(for: .milliseconds(300))
+        guard !Task.isCancelled else { return }
+        controllerPreviewSwitching = false
+        controllerPreviewLensTarget = nil
+    }
+
     private func cancelFirstFrameRetry() {
         firstFrameRetryTask?.cancel()
         firstFrameRetryTask = nil
@@ -3529,12 +3706,20 @@ struct WaitingForApprovalScreen: View {
     private func switchControllerLens() {
         guard !isSwitchingCameraDuringRecording else { return }
         let nextLensFacing: LensFacing = lensFacing == .back ? .front : .back
-        lensFacing = nextLensFacing
+        isSwitchingCameraDuringRecording = true
+        controllerPreviewSwitching = true
+        controllerPreviewLensTarget = nextLensFacing
+        controllerPreviewSwitchStartFrameCount = services.webRtcSession.decodedVideoFrameCount
+        captureFeedback = "Switching camera"
+        controllerLensSwitchTask?.cancel()
+        controllerPreviewLensTask?.cancel()
 
-        if cameraMode == "video" && isVideoRecording {
-            isSwitchingCameraDuringRecording = true
-            captureFeedback = "Switching camera"
-            Task {
+        controllerLensSwitchTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(180))
+            guard !Task.isCancelled else { return }
+            lensFacing = nextLensFacing
+
+            if cameraMode == "video" && isVideoRecording {
                 do {
                     try await services.roomRepository.updateControls(
                         roomCode: roomCode,
@@ -3542,19 +3727,26 @@ struct WaitingForApprovalScreen: View {
                         zoomLevel: zoomLevel,
                         flashEnabled: flashEnabled
                     )
-                    try? await Task.sleep(for: .milliseconds(1200))
+                    await finishControllerPreviewSwitch(to: nextLensFacing, startFrameCount: controllerPreviewSwitchStartFrameCount)
                     if captureFeedback == "Switching camera" {
                         captureFeedback = nil
                     }
                 } catch {
                     errorMessage = error.localizedDescription
+                    controllerPreviewSwitching = false
+                    controllerPreviewLensTarget = nil
                 }
                 isSwitchingCameraDuringRecording = false
+                return
             }
-            return
-        }
 
-        publishControls()
+            publishControls()
+            await finishControllerPreviewSwitch(to: nextLensFacing, startFrameCount: controllerPreviewSwitchStartFrameCount)
+            if captureFeedback == "Switching camera" {
+                captureFeedback = nil
+            }
+            isSwitchingCameraDuringRecording = false
+        }
     }
 
     private func publishControls() {
@@ -3668,6 +3860,10 @@ struct WaitingForApprovalScreen: View {
     }
 
     private func resetControllerSessionState() {
+        controllerPreviewLensTask?.cancel()
+        controllerLensSwitchTask?.cancel()
+        controllerPreviewLensTarget = nil
+        controllerPreviewSwitching = false
         isCaptureRequesting = false
         isSwitchingCameraDuringRecording = false
         isVideoRecording = false
