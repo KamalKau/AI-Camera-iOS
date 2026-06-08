@@ -1,6 +1,7 @@
 @preconcurrency import AVFoundation
 import Combine
 import CoreImage
+import ImageIO
 import Photos
 import SwiftUI
 import UIKit
@@ -1409,10 +1410,10 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         #endif
     }
 
-    func captureHostPhoto(completion: @escaping (UIImage?) -> Void) {
+    func captureHostPhoto(completion: @escaping (UIImage?, Data?, UIDeviceOrientation, LensFacing) -> Void) {
         #if canImport(WebRTC)
         guard role == .host, let cameraCapturer else {
-            completion(nil)
+            completion(nil, nil, currentDeviceCaptureOrientation(), activeLensFacing)
             return
         }
         configureHostPhotoOutput(on: cameraCapturer)
@@ -1421,20 +1422,23 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         if hostPhotoOutput.supportedFlashModes.contains(.on) {
             settings.flashMode = activeFlashEnabled ? .on : .off
         }
+        let capturedLensFacing = activeLensFacing
+        configurePhotoConnection(hostPhotoOutput, lensFacing: capturedLensFacing)
+        let capturedDeviceOrientation = currentDeviceCaptureOrientation()
         let uniqueID = Int64(settings.uniqueID)
-        let delegate = PhotoCaptureDelegate { [weak self, weak cameraCapturer] image in
+        let delegate = PhotoCaptureDelegate { [weak self, weak cameraCapturer] image, data in
             Task { @MainActor in
                 self?.pendingHostPhotoDelegates[uniqueID] = nil
                 if let cameraCapturer {
                     self?.removeHostPhotoOutput(from: cameraCapturer)
                 }
-                completion(image)
+                completion(image, data, capturedDeviceOrientation, capturedLensFacing)
             }
         }
         pendingHostPhotoDelegates[uniqueID] = delegate
         hostPhotoOutput.capturePhoto(with: settings, delegate: delegate)
         #else
-        completion(nil)
+        completion(nil, nil, currentDeviceCaptureOrientation(), activeLensFacing)
         #endif
     }
 
@@ -2393,9 +2397,9 @@ final class CameraController: NSObject, ObservableObject {
         apply(lensFacing: lensFacing == .back ? .front : .back, zoomLevel: zoomLevel, flashEnabled: flashEnabled)
     }
 
-    func saveCapturedPhotoFromStream(_ image: UIImage?) async {
+    func saveCapturedPhotoFromStream(_ image: UIImage?, data: Data?, capturedDeviceOrientation: UIDeviceOrientation, lensFacing: LensFacing) async {
         lastCapturedImage = image
-        await saveCapturedPhoto(image)
+        await saveCapturedPhoto(image, data: data, capturedDeviceOrientation: capturedDeviceOrientation, lensFacing: lensFacing)
     }
 
     func saveCapturedVideoFromStream(_ url: URL?, error: Error?) async {
@@ -2422,14 +2426,17 @@ final class CameraController: NSObject, ObservableObject {
         if photoOutput.supportedFlashModes.contains(.on) {
             settings.flashMode = flashEnabled ? .on : .off
         }
+        let capturedLensFacing = lensFacing
+        configurePhotoConnection(photoOutput, lensFacing: capturedLensFacing)
+        let capturedDeviceOrientation = currentDeviceCaptureOrientation()
         let uniqueID = Int64(settings.uniqueID)
-        let delegate = PhotoCaptureDelegate { [weak self] image in
+        let delegate = PhotoCaptureDelegate { [weak self] image, data in
             Task { @MainActor in
                 self?.lastCapturedImage = image
                 self?.pendingPhotoDelegates[uniqueID] = nil
                 completion?(image)
                 Task { @MainActor in
-                    await self?.saveCapturedPhoto(image)
+                    await self?.saveCapturedPhoto(image, data: data, capturedDeviceOrientation: capturedDeviceOrientation, lensFacing: capturedLensFacing)
                 }
             }
         }
@@ -2566,14 +2573,30 @@ final class CameraController: NSObject, ObservableObject {
         throw AVError(.deviceNotConnected)
     }
 
-    private func saveCapturedPhoto(_ image: UIImage?) async {
-        guard let image else {
-            photoSaveMessage = "Capture failed."
+    private func saveCapturedPhoto(_ image: UIImage?, data originalData: Data?, capturedDeviceOrientation: UIDeviceOrientation, lensFacing: LensFacing) async {
+        if let image {
+            lastCapturedImage = image
+        }
+        guard let originalData else {
+            photoSaveMessage = "Capture failed. Original photo data was unavailable."
+            return
+        }
+
+        let photoData = await Task.detached(priority: .userInitiated) {
+            PhotoCanvasRenderer.savedPhotoData(
+                originalData: originalData,
+                capturedDeviceOrientation: capturedDeviceOrientation,
+                lensFacing: lensFacing
+            )
+        }.value
+
+        guard let photoData else {
+            photoSaveMessage = "Capture failed. Landscape photo processing failed."
             return
         }
 
         do {
-            lastSavedPhotoURL = try saveToDocuments(image)
+            lastSavedPhotoURL = try saveToDocuments(photoData)
         } catch {
             photoSaveMessage = "Photo captured, but local save failed."
         }
@@ -2584,17 +2607,14 @@ final class CameraController: NSObject, ObservableObject {
         }
 
         do {
-            try await saveToPhotoLibrary(image)
+            try await saveToPhotoLibrary(photoData)
             photoSaveMessage = "Saved to Photos."
         } catch {
             photoSaveMessage = "Saved in app storage. Photos save failed: \(error.localizedDescription)"
         }
     }
 
-    private func saveToDocuments(_ image: UIImage) throws -> URL {
-        guard let data = image.jpegData(compressionQuality: 0.95) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
+    private func saveToDocuments(_ data: Data) throws -> URL {
         let directory = try FileManager.default.url(
             for: .documentDirectory,
             in: .userDomainMask,
@@ -2605,16 +2625,17 @@ final class CameraController: NSObject, ObservableObject {
         formatter.formatOptions = [.withInternetDateTime]
         let safeTimestamp = formatter.string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
-        let url = directory.appendingPathComponent("AI-Camera-\(safeTimestamp).jpg")
+        let url = directory.appendingPathComponent("AI-Camera-\(safeTimestamp).\(photoFileExtension(for: data))")
         try data.write(to: url, options: .atomic)
         return url
     }
 
-    private func saveToPhotoLibrary(_ image: UIImage) async throws {
+    private func saveToPhotoLibrary(_ data: Data) async throws {
         try await ensurePhotoLibraryWriteAccess()
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             PHPhotoLibrary.shared().performChanges {
-                PHAssetChangeRequest.creationRequestForAsset(from: image)
+                let request = PHAssetCreationRequest.forAsset()
+                request.addResource(with: .photo, data: data, options: nil)
             } completionHandler: { success, error in
                 if let error {
                     continuation.resume(throwing: error)
@@ -2625,6 +2646,18 @@ final class CameraController: NSObject, ObservableObject {
                 }
             }
         }
+    }
+
+    private func photoFileExtension(for data: Data) -> String {
+        if data.starts(with: [0xFF, 0xD8, 0xFF]) {
+            return "jpg"
+        }
+        if data.count > 12,
+           let fileType = String(data: data[4..<12], encoding: .ascii),
+           fileType.hasPrefix("ftyphe") || fileType.hasPrefix("ftypms") {
+            return "heic"
+        }
+        return "jpg"
     }
 
     private func saveVideoToPhotoLibrary(_ url: URL) async throws {
@@ -2660,6 +2693,66 @@ final class CameraController: NSObject, ObservableObject {
         guard authorized else {
             throw CocoaError(.userCancelled)
         }
+    }
+}
+
+private func configurePhotoConnection(_ photoOutput: AVCapturePhotoOutput, lensFacing: LensFacing) {
+    guard let connection = photoOutput.connection(with: .video) else { return }
+    if connection.isVideoOrientationSupported {
+        connection.videoOrientation = currentCaptureVideoOrientation()
+    }
+    if connection.isVideoMirroringSupported {
+        connection.automaticallyAdjustsVideoMirroring = false
+        connection.isVideoMirrored = lensFacing == .front
+    }
+}
+
+private func currentCaptureVideoOrientation() -> AVCaptureVideoOrientation {
+    switch currentDeviceCaptureOrientation() {
+    case .landscapeLeft:
+        return .landscapeRight
+    case .landscapeRight:
+        return .landscapeLeft
+    case .portraitUpsideDown:
+        return .portraitUpsideDown
+    default:
+        return .portrait
+    }
+}
+
+private func currentDeviceCaptureOrientation() -> UIDeviceOrientation {
+    DeviceOrientationTracker.shared.currentOrientation()
+}
+
+private final class DeviceOrientationTracker: NSObject {
+    static let shared = DeviceOrientationTracker()
+
+    private var lastValidOrientation: UIDeviceOrientation = .portrait
+
+    private override init() {
+        super.init()
+        UIDevice.current.beginGeneratingDeviceOrientationNotifications()
+        updateOrientation(UIDevice.current.orientation)
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(deviceOrientationDidChange),
+            name: UIDevice.orientationDidChangeNotification,
+            object: nil
+        )
+    }
+
+    func currentOrientation() -> UIDeviceOrientation {
+        updateOrientation(UIDevice.current.orientation)
+        return lastValidOrientation
+    }
+
+    @objc private func deviceOrientationDidChange() {
+        updateOrientation(UIDevice.current.orientation)
+    }
+
+    private func updateOrientation(_ orientation: UIDeviceOrientation) {
+        guard orientation.isLandscape || orientation.isPortrait else { return }
+        lastValidOrientation = orientation
     }
 }
 
@@ -2707,19 +2800,116 @@ private final class VideoFrameCache: NSObject, AVCaptureVideoDataOutputSampleBuf
     }
 }
 
-private final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {
-    private let completion: (UIImage?) -> Void
+private enum PhotoCanvasRenderer {
+    nonisolated static func savedPhotoData(originalData: Data, capturedDeviceOrientation: UIDeviceOrientation, lensFacing: LensFacing) -> Data? {
+        guard let image = UIImage(data: originalData) else { return nil }
+        let rawPixelSize = imagePixelSize(from: originalData)
+        let rawPixelsAreLandscape = rawPixelSize.width > rawPixelSize.height
+        let displayedImageIsLandscape = image.size.width > image.size.height
+        guard capturedDeviceOrientation.isLandscape || rawPixelsAreLandscape || displayedImageIsLandscape else {
+            return originalData
+        }
+        return portraitCanvasData(for: image, capturedDeviceOrientation: capturedDeviceOrientation, lensFacing: lensFacing)
+    }
 
-    init(completion: @escaping (UIImage?) -> Void) {
+    nonisolated private static func imagePixelSize(from data: Data) -> CGSize {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] else {
+            return .zero
+        }
+        let width = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.doubleValue ?? 0
+        let height = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.doubleValue ?? 0
+        return CGSize(width: width, height: height)
+    }
+
+    nonisolated private static func portraitCanvasData(for image: UIImage, capturedDeviceOrientation: UIDeviceOrientation, lensFacing: LensFacing) -> Data? {
+        let effectiveLandscapeOrientation: UIDeviceOrientation = capturedDeviceOrientation.isLandscape ? capturedDeviceOrientation : .landscapeLeft
+        let landscapeImage = image.size.width >= image.size.height
+            ? image
+            : rotatedLandscapeImage(from: image, capturedDeviceOrientation: effectiveLandscapeOrientation)
+        let orientedLandscapeImage = lensFacing == .front
+            ? halfTurnImage(from: landscapeImage)
+            : landscapeImage
+        let sourceSize = orientedLandscapeImage.size
+        guard sourceSize.width > 0, sourceSize.height > 0 else { return nil }
+        let canvasSize = CGSize(width: sourceSize.height, height: sourceSize.width)
+        let drawScale = min(canvasSize.width / sourceSize.width, canvasSize.height / sourceSize.height)
+        let drawSize = CGSize(width: sourceSize.width * drawScale, height: sourceSize.height * drawScale)
+        let drawRect = CGRect(
+            x: (canvasSize.width - drawSize.width) / 2,
+            y: (canvasSize.height - drawSize.height) / 2,
+            width: drawSize.width,
+            height: drawSize.height
+        )
+
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: canvasSize, format: format)
+        let renderedImage = renderer.image { context in
+            UIColor.black.setFill()
+            context.fill(CGRect(origin: .zero, size: canvasSize))
+            orientedLandscapeImage.draw(in: drawRect)
+        }
+        return renderedImage.jpegData(compressionQuality: 0.92)
+    }
+
+    nonisolated private static func halfTurnImage(from image: UIImage) -> UIImage {
+        let sourceSize = image.size
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: sourceSize, format: format)
+        return renderer.image { context in
+            UIColor.black.setFill()
+            context.fill(CGRect(origin: .zero, size: sourceSize))
+            context.cgContext.translateBy(x: sourceSize.width / 2, y: sourceSize.height / 2)
+            context.cgContext.rotate(by: .pi)
+            image.draw(in: CGRect(
+                x: -sourceSize.width / 2,
+                y: -sourceSize.height / 2,
+                width: sourceSize.width,
+                height: sourceSize.height
+            ))
+        }
+    }
+
+    nonisolated private static func rotatedLandscapeImage(from image: UIImage, capturedDeviceOrientation: UIDeviceOrientation) -> UIImage {
+        let sourceSize = image.size
+        let canvasSize = CGSize(width: sourceSize.height, height: sourceSize.width)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: canvasSize, format: format)
+        return renderer.image { context in
+            UIColor.black.setFill()
+            context.fill(CGRect(origin: .zero, size: canvasSize))
+            context.cgContext.translateBy(x: canvasSize.width / 2, y: canvasSize.height / 2)
+            let angle: CGFloat = capturedDeviceOrientation == .landscapeLeft ? .pi / 2 : -.pi / 2
+            context.cgContext.rotate(by: angle)
+            image.draw(in: CGRect(
+                x: -sourceSize.width / 2,
+                y: -sourceSize.height / 2,
+                width: sourceSize.width,
+                height: sourceSize.height
+            ))
+        }
+    }
+}
+
+private final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {
+    private let completion: (UIImage?, Data?) -> Void
+
+    init(completion: @escaping (UIImage?, Data?) -> Void) {
         self.completion = completion
     }
 
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         guard error == nil, let data = photo.fileDataRepresentation() else {
-            completion(nil)
+            completion(nil, nil)
             return
         }
-        completion(UIImage(data: data))
+        completion(UIImage(data: data), data)
     }
 }
 
@@ -3173,8 +3363,15 @@ struct CameraHostScreen: View {
                 isHandlingRemoteCapture = false
             default:
                 if services.webRtcSession.state != .idle {
-                    services.webRtcSession.captureHostPhoto { image in
-                        Task { await camera.saveCapturedPhotoFromStream(image) }
+                    services.webRtcSession.captureHostPhoto { image, data, capturedDeviceOrientation, lensFacing in
+                        Task {
+                            await camera.saveCapturedPhotoFromStream(
+                                image,
+                                data: data,
+                                capturedDeviceOrientation: capturedDeviceOrientation,
+                                lensFacing: lensFacing
+                            )
+                        }
                         resetCaptureRequest()
                         isHandlingRemoteCapture = false
                     }
