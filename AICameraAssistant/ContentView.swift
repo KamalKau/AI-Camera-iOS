@@ -2941,14 +2941,14 @@ private enum PhotoCanvasRenderer {
         format.opaque = true
         let renderer = UIGraphicsImageRenderer(size: displayedSize, format: format)
         return renderer.image { context in
-            canvasBackgroundColor.setFill()
+            defaultPhotosLetterboxColor.setFill()
             context.fill(CGRect(origin: .zero, size: displayedSize))
             image.draw(in: CGRect(origin: .zero, size: displayedSize))
         }
     }
 
-    nonisolated private static var canvasBackgroundColor: UIColor {
-        .black
+    nonisolated private static var defaultPhotosLetterboxColor: UIColor {
+        UIColor(white: 0.0, alpha: 1.0)
     }
 
     nonisolated private static func portraitCanvasData(
@@ -2977,7 +2977,7 @@ private enum PhotoCanvasRenderer {
         format.opaque = true
         let renderer = UIGraphicsImageRenderer(size: canvasSize, format: format)
         let renderedImage = renderer.image { context in
-            canvasBackgroundColor.setFill()
+            defaultPhotosLetterboxColor.setFill()
             context.fill(CGRect(origin: .zero, size: canvasSize))
             landscapeImage.draw(in: drawRect)
         }
@@ -2995,7 +2995,7 @@ private enum PhotoCanvasRenderer {
         format.opaque = true
         let renderer = UIGraphicsImageRenderer(size: canvasSize, format: format)
         return renderer.image { context in
-            canvasBackgroundColor.setFill()
+            defaultPhotosLetterboxColor.setFill()
             context.fill(CGRect(origin: .zero, size: canvasSize))
             context.cgContext.translateBy(x: canvasSize.width / 2, y: canvasSize.height / 2)
             let angle: CGFloat = capturedDeviceOrientation == .landscapeLeft ? .pi / 2 : -.pi / 2
