@@ -29,6 +29,8 @@ final class PreviewContainerView: UIView {
     override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
     var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
     var lensFacing: LensFacing = .back
+    private var lastAppliedVideoOrientation: AVCaptureVideoOrientation?
+    private var lastAppliedMirroring: Bool?
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -57,11 +59,19 @@ final class PreviewContainerView: UIView {
     func updatePreviewConnection() {
         guard let connection = previewLayer.connection else { return }
         if connection.isVideoOrientationSupported {
-            connection.videoOrientation = AVCaptureVideoOrientation.currentPreviewOrientation(lensFacing: lensFacing)
+            let orientation = AVCaptureVideoOrientation.currentPreviewOrientation(lensFacing: lensFacing)
+            if lastAppliedVideoOrientation != orientation {
+                connection.videoOrientation = orientation
+                lastAppliedVideoOrientation = orientation
+            }
         }
         if connection.isVideoMirroringSupported {
-            connection.automaticallyAdjustsVideoMirroring = false
-            connection.isVideoMirrored = lensFacing == .front
+            let isMirrored = lensFacing == .front
+            if lastAppliedMirroring != isMirrored {
+                connection.automaticallyAdjustsVideoMirroring = false
+                connection.isVideoMirrored = isMirrored
+                lastAppliedMirroring = isMirrored
+            }
         }
     }
 
