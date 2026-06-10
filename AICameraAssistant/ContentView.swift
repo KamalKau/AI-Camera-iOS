@@ -84,12 +84,13 @@ actor LocalRoomRepository: RoomRepository {
         }
     }
 
-    func updateControls(roomCode: String, lensFacing: LensFacing, zoomLevel: Double, flashEnabled: Bool) async throws {
+    func updateControls(roomCode: String, lensFacing: LensFacing, zoomLevel: Double, flashMode: String) async throws {
+        let safeFlashMode = Self.safeFlashMode(flashMode)
         try update(roomCode: roomCode) { room in
             room.lensFacing = lensFacing
             room.zoomLevel = max(1.0, min(8.0, zoomLevel))
-            room.flashEnabled = flashEnabled
-            room.flashMode = flashEnabled ? "on" : "off"
+            room.flashEnabled = safeFlashMode != "off"
+            room.flashMode = safeFlashMode
         }
     }
 
@@ -195,6 +196,10 @@ actor LocalRoomRepository: RoomRepository {
         ["photo", "video"].contains(mode) ? mode : "photo"
     }
 
+    private nonisolated static func safeFlashMode(_ mode: String) -> String {
+        ["off", "auto", "on"].contains(mode) ? mode : "off"
+    }
+
     private nonisolated static func safeCaptureRequestType(_ type: String) -> String {
         ["photo", "video_start", "video_stop"].contains(type) ? type : "photo"
     }
@@ -294,12 +299,13 @@ actor FirestoreRoomRepository: RoomRepository {
         ])
     }
 
-    func updateControls(roomCode: String, lensFacing: LensFacing, zoomLevel: Double, flashEnabled: Bool) async throws {
+    func updateControls(roomCode: String, lensFacing: LensFacing, zoomLevel: Double, flashMode: String) async throws {
+        let safeFlashMode = Self.safeFlashMode(flashMode)
         try await update(roomCode: roomCode, values: [
             "lensFacing": lensFacing.rawValue,
             "zoomLevel": max(1.0, min(8.0, zoomLevel)),
-            "flashEnabled": flashEnabled,
-            "flashMode": flashEnabled ? "on" : "off"
+            "flashEnabled": safeFlashMode != "off",
+            "flashMode": safeFlashMode
         ])
     }
 
@@ -464,6 +470,10 @@ actor FirestoreRoomRepository: RoomRepository {
         ["photo", "video"].contains(mode) ? mode : "photo"
     }
 
+    private nonisolated static func safeFlashMode(_ mode: String) -> String {
+        ["off", "auto", "on"].contains(mode) ? mode : "off"
+    }
+
     private nonisolated static func safeCaptureRequestType(_ type: String) -> String {
         ["photo", "video_start", "video_stop"].contains(type) ? type : "photo"
     }
@@ -605,7 +615,7 @@ actor FirestoreRoomRepository: RoomRepository {
         } else {
             captureRequest = nil
         }
-        let flashMode = data["flashMode"]?.stringValue ?? (data["flashEnabled"]?.booleanValue == true ? "on" : "off")
+        let flashMode = Self.safeFlashMode(data["flashMode"]?.stringValue ?? (data["flashEnabled"]?.booleanValue == true ? "on" : "off"))
         return RoomDocument(
             roomCode: roomCode,
             status: decodeStatus(data["status"]?.stringValue),
@@ -886,12 +896,13 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
         ])
     }
 
-    func updateControls(roomCode: String, lensFacing: LensFacing, zoomLevel: Double, flashEnabled: Bool) async throws {
+    func updateControls(roomCode: String, lensFacing: LensFacing, zoomLevel: Double, flashMode: String) async throws {
+        let safeFlashMode = Self.safeFlashMode(flashMode)
         try await update(roomCode: roomCode, values: [
             "lensFacing": lensFacing.rawValue,
             "zoomLevel": max(1.0, min(8.0, zoomLevel)),
-            "flashEnabled": flashEnabled,
-            "flashMode": flashEnabled ? "on" : "off"
+            "flashEnabled": safeFlashMode != "off",
+            "flashMode": safeFlashMode
         ])
     }
 
@@ -1051,7 +1062,7 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
 
     private static func decodeRoom(_ data: [String: Any]) -> RoomDocument? {
         guard let roomCode = data["roomCode"] as? String else { return nil }
-        let flashMode = data["flashMode"] as? String ?? ((data["flashEnabled"] as? Bool) == true ? "on" : "off")
+        let flashMode = Self.safeFlashMode(data["flashMode"] as? String ?? ((data["flashEnabled"] as? Bool) == true ? "on" : "off"))
         let captureRequest: CaptureRequest?
         if (data["captureRequest"] as? Bool) == true {
             captureRequest = CaptureRequest(
@@ -1138,6 +1149,10 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
         ["photo", "video"].contains(mode) ? mode : "photo"
     }
 
+    private static func safeFlashMode(_ mode: String) -> String {
+        ["off", "auto", "on"].contains(mode) ? mode : "off"
+    }
+
     private static func safeCaptureRequestType(_ type: String) -> String {
         ["photo", "video_start", "video_stop"].contains(type) ? type : "photo"
     }
@@ -1190,7 +1205,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     private var activeCaptureDevice: AVCaptureDevice?
     private var activeLensFacing: LensFacing = .back
     private var activeZoomLevel = 1.0
-    private var activeFlashEnabled = false
+    private var activeFlashMode = "off"
     private let hostPhotoOutput = AVCapturePhotoOutput()
     private let hostVideoFrameOutput = AVCaptureVideoDataOutput()
     private let hostFrameCache = VideoFrameCache()
@@ -1334,13 +1349,13 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         #endif
     }
 
-    func applyCameraControls(lensFacing: LensFacing, zoomLevel: Double, flashEnabled: Bool) {
+    func applyCameraControls(lensFacing: LensFacing, zoomLevel: Double, flashMode: String) {
         #if canImport(WebRTC)
         guard role == .host, let cameraCapturer else { return }
         let clampedZoom = max(1.0, min(8.0, zoomLevel))
         let shouldSwitchLens = activeLensFacing != lensFacing
         activeZoomLevel = clampedZoom
-        activeFlashEnabled = flashEnabled
+        activeFlashMode = flashMode.safeCameraFlashMode
 
         if shouldSwitchLens {
             guard !isHostVideoRecording, !isPreparingHostVideoRecording else {
@@ -1421,8 +1436,8 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         configureHostPhotoOutput(on: cameraCapturer)
         let settings = AVCapturePhotoSettings()
         settings.photoQualityPrioritization = .speed
-        if hostPhotoOutput.supportedFlashModes.contains(.on) {
-            settings.flashMode = activeFlashEnabled ? .on : .off
+        if let flashMode = activeFlashMode.avCaptureFlashMode(supportedModes: hostPhotoOutput.supportedFlashModes) {
+            settings.flashMode = flashMode
         }
         let capturedLensFacing = activeLensFacing
         configurePhotoConnection(hostPhotoOutput, lensFacing: capturedLensFacing)
@@ -2300,7 +2315,9 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var photoSaveMessage: String?
     @Published var lensFacing: LensFacing = .back
     @Published var zoomLevel: Double = 1.0
-    @Published var flashEnabled = false
+    @Published var flashMode = "off"
+
+    var flashEnabled: Bool { flashMode != "off" }
 
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
@@ -2332,7 +2349,7 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
-    func prepareForPhotoCapture(lensFacing: LensFacing, zoomLevel: Double, flashEnabled: Bool) async -> Bool {
+    func prepareForPhotoCapture(lensFacing: LensFacing, zoomLevel: Double, flashMode: String) async -> Bool {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             permissionState = .granted
@@ -2347,7 +2364,7 @@ final class CameraController: NSObject, ObservableObject {
 
         self.lensFacing = lensFacing
         self.zoomLevel = max(1.0, min(8.0, zoomLevel))
-        self.flashEnabled = flashEnabled
+        self.flashMode = flashMode.safeCameraFlashMode
         return await configureAndStartForPhotoCapture()
     }
 
@@ -2391,12 +2408,12 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
-    func apply(lensFacing: LensFacing, zoomLevel: Double, flashEnabled: Bool) {
+    func apply(lensFacing: LensFacing, zoomLevel: Double, flashMode: String) {
         let clampedZoom = max(1.0, min(8.0, zoomLevel))
         let shouldSwitchLens = self.lensFacing != lensFacing
         self.lensFacing = lensFacing
         self.zoomLevel = clampedZoom
-        self.flashEnabled = flashEnabled
+        self.flashMode = flashMode.safeCameraFlashMode
         shouldSwitchLens ? configureAndStart() : applyZoom(clampedZoom)
     }
 
@@ -2409,7 +2426,7 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     func switchLens() {
-        apply(lensFacing: lensFacing == .back ? .front : .back, zoomLevel: zoomLevel, flashEnabled: flashEnabled)
+        apply(lensFacing: lensFacing == .back ? .front : .back, zoomLevel: zoomLevel, flashMode: flashMode)
     }
 
     private func prewarmPhotoStorageIfNeeded() {
@@ -2458,8 +2475,8 @@ final class CameraController: NSObject, ObservableObject {
     func capturePhoto(completion: ((UIImage?) -> Void)? = nil) {
         let settings = AVCapturePhotoSettings()
         settings.photoQualityPrioritization = .speed
-        if photoOutput.supportedFlashModes.contains(.on) {
-            settings.flashMode = flashEnabled ? .on : .off
+        if let flashMode = flashMode.avCaptureFlashMode(supportedModes: photoOutput.supportedFlashModes) {
+            settings.flashMode = flashMode
         }
         let capturedLensFacing = lensFacing
         configurePhotoConnection(photoOutput, lensFacing: capturedLensFacing)
@@ -2721,6 +2738,49 @@ final class CameraController: NSObject, ObservableObject {
         guard authorized else {
             throw CocoaError(.userCancelled)
         }
+    }
+}
+
+private extension String {
+    var safeCameraFlashMode: String {
+        ["off", "auto", "on"].contains(self) ? self : "off"
+    }
+
+    var nextCameraFlashMode: String {
+        switch safeCameraFlashMode {
+        case "off": return "auto"
+        case "auto": return "on"
+        default: return "off"
+        }
+    }
+
+    var cameraFlashLabel: String {
+        switch safeCameraFlashMode {
+        case "auto": return "Flash Auto"
+        case "on": return "Flash On"
+        default: return "Flash Off"
+        }
+    }
+
+    var cameraFlashIconName: String {
+        switch safeCameraFlashMode {
+        case "auto": return "bolt"
+        case "on": return "bolt.fill"
+        default: return "bolt.slash"
+        }
+    }
+
+    func avCaptureFlashMode(supportedModes: [AVCaptureDevice.FlashMode]) -> AVCaptureDevice.FlashMode? {
+        let requestedMode: AVCaptureDevice.FlashMode
+        switch safeCameraFlashMode {
+        case "auto": requestedMode = .auto
+        case "on": requestedMode = .on
+        default: requestedMode = .off
+        }
+        if supportedModes.contains(requestedMode) {
+            return requestedMode
+        }
+        return supportedModes.contains(.off) ? .off : nil
     }
 }
 
@@ -3227,10 +3287,10 @@ struct CameraHostScreen: View {
             }
 
             CameraCircleButton(
-                systemName: camera.flashEnabled ? "bolt.fill" : "bolt.slash",
-                isSelected: camera.flashEnabled
+                systemName: camera.flashMode.cameraFlashIconName,
+                isSelected: camera.flashMode != "off"
             ) {
-                camera.flashEnabled.toggle()
+                camera.flashMode = camera.flashMode.nextCameraFlashMode
                 publishCurrentControls()
             }
 
@@ -3268,7 +3328,7 @@ struct CameraHostScreen: View {
                     .fontWeight(.semibold)
                     .foregroundStyle(.yellow)
                 Text(String(format: "%.1fx", camera.zoomLevel))
-                Text(camera.flashEnabled ? "Flash On" : "Flash Off")
+                Text(camera.flashMode.cameraFlashLabel)
                 Text((room?.aspectRatioMode ?? "full").cameraAspectRatioLabel)
             }
             .font(.caption.weight(.medium))
@@ -3344,13 +3404,13 @@ struct CameraHostScreen: View {
                 }
                 services.webRtcSession.applyStreamQualityMode(nextRoom.streamQualityMode)
                 if services.webRtcSession.state == .idle {
-                    camera.apply(lensFacing: nextRoom.lensFacing, zoomLevel: nextRoom.zoomLevel, flashEnabled: nextRoom.flashEnabled)
+                    camera.apply(lensFacing: nextRoom.lensFacing, zoomLevel: nextRoom.zoomLevel, flashMode: nextRoom.flashMode)
                     camera.applyExposureIndex(nextRoom.exposureIndex)
                 } else {
                     services.webRtcSession.applyCameraControls(
                         lensFacing: nextRoom.lensFacing,
                         zoomLevel: nextRoom.zoomLevel,
-                        flashEnabled: nextRoom.flashEnabled
+                        flashMode: nextRoom.flashMode
                     )
                     applyExposureIfNeeded(nextRoom.exposureIndex)
                 }
@@ -3511,7 +3571,7 @@ struct CameraHostScreen: View {
 
     private func publishCurrentControls() {
         Task {
-            try? await services.roomRepository.updateControls(roomCode: roomCode, lensFacing: camera.lensFacing, zoomLevel: camera.zoomLevel, flashEnabled: camera.flashEnabled)
+            try? await services.roomRepository.updateControls(roomCode: roomCode, lensFacing: camera.lensFacing, zoomLevel: camera.zoomLevel, flashMode: camera.flashMode)
         }
     }
 
@@ -3545,7 +3605,7 @@ struct WaitingForApprovalScreen: View {
     @State private var room: RoomDocument?
     @State private var lensFacing: LensFacing = .back
     @State private var zoomLevel = 1.0
-    @State private var flashEnabled = false
+    @State private var flashMode = "off"
     @State private var cameraMode = "photo"
     @State private var isVideoRecording = false
     @State private var errorMessage: String?
@@ -3790,10 +3850,10 @@ struct WaitingForApprovalScreen: View {
             }
 
             CameraCircleButton(
-                systemName: flashEnabled ? "bolt.fill" : "bolt.slash",
-                isSelected: flashEnabled
+                systemName: flashMode.cameraFlashIconName,
+                isSelected: flashMode != "off"
             ) {
-                flashEnabled.toggle()
+                flashMode = flashMode.nextCameraFlashMode
                 publishControls()
             }
 
@@ -3894,7 +3954,7 @@ struct WaitingForApprovalScreen: View {
                     controllerPreviewSwitching = false
                 }
                 zoomLevel = nextRoom.zoomLevel
-                flashEnabled = nextRoom.flashEnabled
+                flashMode = nextRoom.flashMode.safeCameraFlashMode
                 cameraMode = nextRoom.cameraMode
                 exposureValue = Double(nextRoom.exposureIndex) / 8.0
                 if !didPrewarmControllerStream {
@@ -3975,7 +4035,7 @@ struct WaitingForApprovalScreen: View {
                         roomCode: roomCode,
                         lensFacing: nextLensFacing,
                         zoomLevel: zoomLevel,
-                        flashEnabled: flashEnabled
+                        flashMode: flashMode
                     )
                     await finishControllerPreviewSwitch(to: nextLensFacing, startFrameCount: controllerPreviewSwitchStartFrameCount)
                     if captureFeedback == "Switching camera" {
@@ -4003,7 +4063,7 @@ struct WaitingForApprovalScreen: View {
         zoomPublishTask?.cancel()
         Task {
             do {
-                try await services.roomRepository.updateControls(roomCode: roomCode, lensFacing: lensFacing, zoomLevel: zoomLevel, flashEnabled: flashEnabled)
+                try await services.roomRepository.updateControls(roomCode: roomCode, lensFacing: lensFacing, zoomLevel: zoomLevel, flashMode: flashMode)
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -4016,7 +4076,7 @@ struct WaitingForApprovalScreen: View {
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
             do {
-                try await services.roomRepository.updateControls(roomCode: roomCode, lensFacing: lensFacing, zoomLevel: zoomLevel, flashEnabled: flashEnabled)
+                try await services.roomRepository.updateControls(roomCode: roomCode, lensFacing: lensFacing, zoomLevel: zoomLevel, flashMode: flashMode)
             } catch {
                 await MainActor.run { errorMessage = error.localizedDescription }
             }
