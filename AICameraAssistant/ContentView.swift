@@ -1206,6 +1206,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     private var activeLensFacing: LensFacing = .back
     private var activeZoomLevel = 1.0
     private var activeFlashMode = "off"
+    private let hostCaptureQueue = DispatchQueue(label: "webrtc.host.capture.queue", qos: .userInitiated)
     private let hostPhotoOutput = AVCapturePhotoOutput()
     private let hostVideoFrameOutput = AVCaptureVideoDataOutput()
     private let hostFrameCache = VideoFrameCache()
@@ -1433,26 +1434,29 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
             completion(nil, nil, capturedDeviceOrientation, activeLensFacing, shouldUseLandscapeCanvas(photoOutput: hostPhotoOutput, capturedDeviceOrientation: capturedDeviceOrientation))
             return
         }
-        configureHostPhotoOutput(on: cameraCapturer)
+        let selectedFlashMode = activeFlashMode.safeCameraFlashMode
+        let capturedLensFacing = activeLensFacing
+        let capturedDeviceOrientation = currentDeviceCaptureOrientation()
         let settings = AVCapturePhotoSettings()
         settings.photoQualityPrioritization = .speed
-        if let flashMode = activeFlashMode.avCaptureFlashMode(supportedModes: hostPhotoOutput.supportedFlashModes) {
-            settings.flashMode = flashMode
-        }
-        let capturedLensFacing = activeLensFacing
-        configurePhotoConnection(hostPhotoOutput, lensFacing: capturedLensFacing)
-        let capturedDeviceOrientation = currentDeviceCaptureOrientation()
-        let useLandscapeCanvas = shouldUseLandscapeCanvas(photoOutput: hostPhotoOutput, capturedDeviceOrientation: capturedDeviceOrientation)
         let uniqueID = Int64(settings.uniqueID)
         let delegate = PhotoCaptureDelegate { [weak self] image, data, diagnostics in
             Task { @MainActor in
                 self?.pendingHostPhotoDelegates[uniqueID] = nil
-                let finalUseLandscapeCanvas = useLandscapeCanvas || diagnostics.storedLandscape
+                let finalUseLandscapeCanvas = diagnostics.storedLandscape
                 completion(image, data, capturedDeviceOrientation, capturedLensFacing, finalUseLandscapeCanvas)
             }
         }
         pendingHostPhotoDelegates[uniqueID] = delegate
-        hostPhotoOutput.capturePhoto(with: settings, delegate: delegate)
+        let hostPhotoOutput = hostPhotoOutput
+        hostCaptureQueue.async {
+            Self.configureHostPhotoOutput(hostPhotoOutput, on: cameraCapturer)
+            if let flashMode = selectedFlashMode.avCaptureFlashMode(supportedModes: hostPhotoOutput.supportedFlashModes) {
+                settings.flashMode = flashMode
+            }
+            configurePhotoConnection(hostPhotoOutput, lensFacing: capturedLensFacing)
+            hostPhotoOutput.capturePhoto(with: settings, delegate: delegate)
+        }
         #else
         let capturedDeviceOrientation = currentDeviceCaptureOrientation()
         completion(nil, nil, capturedDeviceOrientation, activeLensFacing, shouldUseLandscapeCanvas(photoOutput: hostPhotoOutput, capturedDeviceOrientation: capturedDeviceOrientation))
@@ -1546,18 +1550,26 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     }
 
     private nonisolated static func preparePhotoOutput(_ photoOutput: AVCapturePhotoOutput) {
-        let settings = AVCapturePhotoSettings()
-        settings.photoQualityPrioritization = .speed
-        photoOutput.setPreparedPhotoSettingsArray([settings]) { _, _ in }
+        let supportedFlashModes = photoOutput.supportedFlashModes
+        let preparedSettings = [AVCaptureDevice.FlashMode.off, .auto, .on].compactMap { flashMode -> AVCapturePhotoSettings? in
+            guard supportedFlashModes.contains(flashMode) else { return nil }
+            let settings = AVCapturePhotoSettings()
+            settings.photoQualityPrioritization = .speed
+            settings.flashMode = flashMode
+            return settings
+        }
+        let fallbackSettings = AVCapturePhotoSettings()
+        fallbackSettings.photoQualityPrioritization = .speed
+        photoOutput.setPreparedPhotoSettingsArray(preparedSettings.isEmpty ? [fallbackSettings] : preparedSettings) { _, _ in }
     }
 
-    private func configureHostPhotoOutput(on capturer: RTCCameraVideoCapturer) {
+    private nonisolated static func configureHostPhotoOutput(_ photoOutput: AVCapturePhotoOutput, on capturer: RTCCameraVideoCapturer) {
         let session = capturer.captureSession
-        guard !session.outputs.contains(hostPhotoOutput), session.canAddOutput(hostPhotoOutput) else { return }
+        guard !session.outputs.contains(photoOutput), session.canAddOutput(photoOutput) else { return }
         session.beginConfiguration()
-        session.addOutput(hostPhotoOutput)
+        session.addOutput(photoOutput)
         session.commitConfiguration()
-        Self.preparePhotoOutput(hostPhotoOutput)
+        Self.preparePhotoOutput(photoOutput)
     }
 
     private func removeHostPhotoOutput(from capturer: RTCCameraVideoCapturer) {
@@ -1605,20 +1617,37 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         func restartIfNeeded() {
             guard !didRestart, captureSwitchGeneration == switchGeneration else { return }
             didRestart = true
-            do {
-                try startCapture(cameraCapturer, lensFacing: lensFacing, commitCapturedLensImmediately: false)
-                isRestartingCapture = false
-                capturedLensCommitTask?.cancel()
-                capturedLensCommitTask = Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(450))
-                    guard !Task.isCancelled, captureSwitchGeneration == switchGeneration else { return }
-                    capturedLensFacing = lensFacing
+            let profile = streamQualityMode.webRtcProfile
+            let zoomLevel = activeZoomLevel
+            let exposureIndex = activeExposureIndex
+            let photoOutput = hostPhotoOutput
+            hostCaptureQueue.async { [weak self] in
+                do {
+                    let device = try Self.startCaptureOnCapturer(cameraCapturer, lensFacing: lensFacing, profile: profile)
+                    Self.applyDeviceControls(device, zoomLevel: zoomLevel)
+                    Self.applyExposureOnDevice(device, exposureIndex: exposureIndex)
+                    Self.configureHostPhotoOutput(photoOutput, on: cameraCapturer)
+                    Task { @MainActor in
+                        guard let self, self.captureSwitchGeneration == switchGeneration else { return }
+                        self.activeCaptureDevice = device
+                        self.activeLensFacing = lensFacing
+                        self.isRestartingCapture = false
+                        self.capturedLensCommitTask?.cancel()
+                        self.capturedLensCommitTask = Task { @MainActor in
+                            try? await Task.sleep(for: .milliseconds(300))
+                            guard !Task.isCancelled, self.captureSwitchGeneration == switchGeneration else { return }
+                            self.capturedLensFacing = lensFacing
+                        }
+                        completion?()
+                    }
+                } catch {
+                    Task { @MainActor in
+                        guard let self else { return }
+                        self.isRestartingCapture = false
+                        self.state = .failed
+                        self.finalizeHostRecording(error: error)
+                    }
                 }
-                completion?()
-            } catch {
-                isRestartingCapture = false
-                state = .failed
-                finalizeHostRecording(error: error)
             }
         }
 
@@ -1869,7 +1898,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         }
         applyDeviceControls(zoomLevel: activeZoomLevel)
         applyExposureOnDevice(device, exposureIndex: activeExposureIndex)
-        configureHostPhotoOutput(on: capturer)
+        Self.configureHostPhotoOutput(hostPhotoOutput, on: capturer)
     }
 
     private nonisolated static func startCaptureOnCapturer(
@@ -1896,6 +1925,29 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         let supportedFPS = format.videoSupportedFrameRateRanges.map { Int($0.maxFrameRate) }.max() ?? profile.fps
         capturer.startCapture(with: device, format: format, fps: min(supportedFPS, profile.fps))
         return device
+    }
+
+    private nonisolated static func applyDeviceControls(_ device: AVCaptureDevice, zoomLevel: Double) {
+        do {
+            try device.lockForConfiguration()
+            let maxZoom = min(device.activeFormat.videoMaxZoomFactor, 8.0)
+            device.videoZoomFactor = max(1.0, min(maxZoom, zoomLevel))
+            device.unlockForConfiguration()
+        } catch {
+            device.unlockForConfiguration()
+        }
+    }
+
+    private nonisolated static func applyExposureOnDevice(_ device: AVCaptureDevice, exposureIndex: Int) {
+        do {
+            try device.lockForConfiguration()
+            let targetBias = Float(exposureIndex) / 2.0
+            let clampedBias = min(device.maxExposureTargetBias, max(device.minExposureTargetBias, targetBias))
+            device.setExposureTargetBias(clampedBias) { _ in }
+            device.unlockForConfiguration()
+        } catch {
+            device.unlockForConfiguration()
+        }
     }
 
     private func applyDeviceControls(zoomLevel: Double) {
@@ -2444,9 +2496,17 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private nonisolated static func preparePhotoOutput(_ photoOutput: AVCapturePhotoOutput) {
-        let settings = AVCapturePhotoSettings()
-        settings.photoQualityPrioritization = .speed
-        photoOutput.setPreparedPhotoSettingsArray([settings]) { _, _ in }
+        let supportedFlashModes = photoOutput.supportedFlashModes
+        let preparedSettings = [AVCaptureDevice.FlashMode.off, .auto, .on].compactMap { flashMode -> AVCapturePhotoSettings? in
+            guard supportedFlashModes.contains(flashMode) else { return nil }
+            let settings = AVCapturePhotoSettings()
+            settings.photoQualityPrioritization = .speed
+            settings.flashMode = flashMode
+            return settings
+        }
+        let fallbackSettings = AVCapturePhotoSettings()
+        fallbackSettings.photoQualityPrioritization = .speed
+        photoOutput.setPreparedPhotoSettingsArray(preparedSettings.isEmpty ? [fallbackSettings] : preparedSettings) { _, _ in }
     }
 
     func saveCapturedPhotoFromStream(_ image: UIImage?, data: Data?, capturedDeviceOrientation: UIDeviceOrientation, lensFacing: LensFacing, useLandscapeCanvas: Bool) async {
@@ -2473,13 +2533,11 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     func capturePhoto(completion: ((UIImage?) -> Void)? = nil) {
+        let selectedFlashMode = flashMode.safeCameraFlashMode
+        let capturedLensFacing = lensFacing
+        let photoOutput = photoOutput
         let settings = AVCapturePhotoSettings()
         settings.photoQualityPrioritization = .speed
-        if let flashMode = flashMode.avCaptureFlashMode(supportedModes: photoOutput.supportedFlashModes) {
-            settings.flashMode = flashMode
-        }
-        let capturedLensFacing = lensFacing
-        configurePhotoConnection(photoOutput, lensFacing: capturedLensFacing)
         let uniqueID = Int64(settings.uniqueID)
         let delegate = PhotoCaptureDelegate { [weak self] image, data, _ in
             Task { @MainActor in
@@ -2492,7 +2550,13 @@ final class CameraController: NSObject, ObservableObject {
             }
         }
         pendingPhotoDelegates[uniqueID] = delegate
-        photoOutput.capturePhoto(with: settings, delegate: delegate)
+        sessionQueue.async {
+            if let flashMode = selectedFlashMode.avCaptureFlashMode(supportedModes: photoOutput.supportedFlashModes) {
+                settings.flashMode = flashMode
+            }
+            configurePhotoConnection(photoOutput, lensFacing: capturedLensFacing)
+            photoOutput.capturePhoto(with: settings, delegate: delegate)
+        }
     }
 
     private func configureAndStart() {
@@ -3427,12 +3491,10 @@ struct CameraHostScreen: View {
     private func switchHostLens() {
         hostPreviewSwitchTask?.cancel()
         hostPreviewSwitching = true
+        camera.switchLens()
+        publishCurrentControls()
         hostPreviewSwitchTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(180))
-            guard !Task.isCancelled else { return }
-            camera.switchLens()
-            publishCurrentControls()
-            try? await Task.sleep(for: .milliseconds(1200))
+            try? await Task.sleep(for: .milliseconds(650))
             guard !Task.isCancelled else { return }
             hostPreviewLensFacing = services.webRtcSession.capturedLensFacing
             hostPreviewSwitching = false
@@ -3982,8 +4044,8 @@ struct WaitingForApprovalScreen: View {
     }
 
     private func finishControllerPreviewSwitch(to lensFacing: LensFacing, startFrameCount: Int) async {
-        let minimumDelayMilliseconds = 700
-        let maximumDelayMilliseconds = 2200
+        let minimumDelayMilliseconds = 250
+        let maximumDelayMilliseconds = 1200
         var elapsedMilliseconds = 0
 
         while elapsedMilliseconds < minimumDelayMilliseconds {
@@ -3999,7 +4061,7 @@ struct WaitingForApprovalScreen: View {
         }
 
         controllerPreviewLensFacing = lensFacing
-        try? await Task.sleep(for: .milliseconds(300))
+        try? await Task.sleep(for: .milliseconds(120))
         guard !Task.isCancelled else { return }
         controllerPreviewSwitching = false
         controllerPreviewLensTarget = nil
@@ -4025,8 +4087,6 @@ struct WaitingForApprovalScreen: View {
         controllerPreviewLensTask?.cancel()
 
         controllerLensSwitchTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(180))
-            guard !Task.isCancelled else { return }
             lensFacing = nextLensFacing
 
             if cameraMode == "video" && isVideoRecording {
