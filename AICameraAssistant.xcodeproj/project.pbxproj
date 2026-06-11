@@ -322,6 +322,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "AICameraAssistant needs camera access to host the remote camera preview and capture photos.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "AICameraAssistant needs microphone access to record audio with remote camera videos";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Save captured photos to your photo library";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -357,6 +358,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_NSCameraUsageDescription = "AICameraAssistant needs camera access to host the remote camera preview and capture photos.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "AICameraAssistant needs microphone access to record audio with remote camera videos";
 				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "Save captured photos to your photo library";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;

@@ -6,6 +6,7 @@ import ImageIO
 import Photos
 import SwiftUI
 import UIKit
+import Vision
 #if canImport(FirebaseFirestore)
 import FirebaseFirestore
 #endif
@@ -49,6 +50,8 @@ actor LocalRoomRepository: RoomRepository {
             room.status = .waitingForApproval
             room.controllerApproved = false
             room.captureRequest = nil
+            room.captureRequestId = 0
+            room.captureRequestType = "photo"
             room.offer = nil
             room.answer = nil
             room.rtcSessionId = nil
@@ -76,6 +79,9 @@ actor LocalRoomRepository: RoomRepository {
             room.requestReceived = false
             room.controllerApproved = false
             room.status = .ended
+            room.captureRequest = nil
+            room.captureRequestId = 0
+            room.captureRequestType = "photo"
             room.offer = nil
             room.answer = nil
             room.rtcSessionId = nil
@@ -94,6 +100,32 @@ actor LocalRoomRepository: RoomRepository {
         }
     }
 
+    func updateLensFacing(roomCode: String, lensFacing: LensFacing) async throws {
+        try update(roomCode: roomCode) { $0.lensFacing = lensFacing }
+    }
+
+    func updateZoomLevel(roomCode: String, zoomLevel: Double) async throws {
+        try update(roomCode: roomCode) { room in
+            room.zoomLevel = max(room.minZoom, min(room.maxZoom, zoomLevel))
+        }
+    }
+
+    func updateZoomRange(roomCode: String, minZoom: Double, maxZoom: Double) async throws {
+        try update(roomCode: roomCode) { room in
+            room.minZoom = max(1.0, minZoom)
+            room.maxZoom = max(room.minZoom, maxZoom)
+            room.zoomLevel = max(room.minZoom, min(room.maxZoom, room.zoomLevel))
+        }
+    }
+
+    func updateFlashMode(roomCode: String, flashMode: String) async throws {
+        let safeFlashMode = Self.safeFlashMode(flashMode)
+        try update(roomCode: roomCode) { room in
+            room.flashMode = safeFlashMode
+            room.flashEnabled = safeFlashMode != "off"
+        }
+    }
+
     func updateCameraMode(roomCode: String, cameraMode: String) async throws {
         try update(roomCode: roomCode) { $0.cameraMode = Self.safeCameraMode(cameraMode) }
     }
@@ -102,11 +134,35 @@ actor LocalRoomRepository: RoomRepository {
         try update(roomCode: roomCode) { $0.gridEnabled = gridEnabled }
     }
 
+    func updateNightModeEnabled(roomCode: String, nightModeEnabled: Bool) async throws {
+        try update(roomCode: roomCode) { $0.nightModeEnabled = nightModeEnabled }
+    }
+
+    func updateVideoHdrEnabled(roomCode: String, videoHdrEnabled: Bool) async throws {
+        try update(roomCode: roomCode) { $0.videoHdrEnabled = videoHdrEnabled }
+    }
+
+    func updateToolbarExpanded(roomCode: String, toolbarExpanded: Bool) async throws {
+        try update(roomCode: roomCode) { $0.toolbarExpanded = toolbarExpanded }
+    }
+
+    func updatePortraitControls(roomCode: String, blurLevel: String, strength: Int, effect: String) async throws {
+        try update(roomCode: roomCode) { room in
+            room.portraitBlurLevel = blurLevel
+            room.portraitStrength = min(7, max(1, strength))
+            room.portraitEffect = effect
+        }
+    }
+
+    func updateSceneDetectionEnabled(roomCode: String, sceneDetectionEnabled: Bool) async throws {
+        try update(roomCode: roomCode) { $0.sceneDetectionEnabled = sceneDetectionEnabled }
+    }
+
     func updateAspectRatioMode(roomCode: String, aspectRatioMode: String) async throws {
         try update(roomCode: roomCode) { $0.aspectRatioMode = Self.safeAspectRatioMode(aspectRatioMode) }
     }
 
-    func updateFocusRequest(roomCode: String, x: Double, y: Double, requestId: Int, lockEnabled: Bool) async throws {
+    func updateFocusRequest(roomCode: String, x: Double, y: Double, requestId: Int64, lockEnabled: Bool) async throws {
         try update(roomCode: roomCode) { room in
             room.focusPointX = min(1.0, max(0.0, x))
             room.focusPointY = min(1.0, max(0.0, y))
@@ -120,11 +176,20 @@ actor LocalRoomRepository: RoomRepository {
     }
 
     func requestCapture(roomCode: String, type: String) async throws {
-        try update(roomCode: roomCode) { $0.captureRequest = .new(type: Self.safeCaptureRequestType(type)) }
+        try update(roomCode: roomCode) { room in
+            let request = CaptureRequest.new(type: Self.safeCaptureRequestType(type))
+            room.captureRequest = request
+            room.captureRequestId = request.id
+            room.captureRequestType = request.type
+        }
     }
 
     func resetCaptureRequest(roomCode: String) async throws {
-        try update(roomCode: roomCode) { $0.captureRequest = nil }
+        try update(roomCode: roomCode) { room in
+            room.captureRequest = nil
+            room.captureRequestId = 0
+            room.captureRequestType = "photo"
+        }
     }
 
     func setOffer(_ sdp: String, roomCode: String, rtcSessionId: String) async throws {
@@ -185,15 +250,16 @@ actor LocalRoomRepository: RoomRepository {
     }
 
     private nonisolated static func makeRoomCode() -> String {
-        String(Int.random(in: 100_000...999_999))
+        let chars = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        return String((0..<5).compactMap { _ in chars.randomElement() })
     }
 
     private nonisolated static func safeAspectRatioMode(_ mode: String) -> String {
-        ["full", "4:3", "square"].contains(mode) ? mode : "full"
+        ["full", "9_16", "3_4", "1_1"].contains(mode) ? mode : "full"
     }
 
     private nonisolated static func safeCameraMode(_ mode: String) -> String {
-        ["photo", "video"].contains(mode) ? mode : "photo"
+        ["photo", "video", "portrait"].contains(mode) ? mode : "photo"
     }
 
     private nonisolated static func safeFlashMode(_ mode: String) -> String {
@@ -201,7 +267,7 @@ actor LocalRoomRepository: RoomRepository {
     }
 
     private nonisolated static func safeCaptureRequestType(_ type: String) -> String {
-        ["photo", "video_start", "video_stop"].contains(type) ? type : "photo"
+        ["photo", "boomerang", "video_start", "video_stop", "video_pause", "video_resume"].contains(type) ? type : "photo"
     }
 }
 
@@ -266,6 +332,9 @@ actor FirestoreRoomRepository: RoomRepository {
             "requestReceived": true,
             "controllerApproved": false,
             "status": RoomStatus.waitingForApproval.rawValue,
+            "captureRequest": false,
+            "captureRequestId": 0,
+            "captureRequestType": "photo",
             "offer": FirestoreValue.null,
             "answer": FirestoreValue.null,
             "rtcSessionId": FirestoreValue.null
@@ -309,6 +378,30 @@ actor FirestoreRoomRepository: RoomRepository {
         ])
     }
 
+    func updateLensFacing(roomCode: String, lensFacing: LensFacing) async throws {
+        try await update(roomCode: roomCode, values: ["lensFacing": lensFacing.rawValue])
+    }
+
+    func updateZoomLevel(roomCode: String, zoomLevel: Double) async throws {
+        try await update(roomCode: roomCode, values: ["zoomLevel": max(1.0, min(8.0, zoomLevel))])
+    }
+
+    func updateZoomRange(roomCode: String, minZoom: Double, maxZoom: Double) async throws {
+        let safeMinZoom = max(1.0, minZoom)
+        try await update(roomCode: roomCode, values: [
+            "minZoom": safeMinZoom,
+            "maxZoom": max(safeMinZoom, maxZoom)
+        ])
+    }
+
+    func updateFlashMode(roomCode: String, flashMode: String) async throws {
+        let safeFlashMode = Self.safeFlashMode(flashMode)
+        try await update(roomCode: roomCode, values: [
+            "flashEnabled": safeFlashMode != "off",
+            "flashMode": safeFlashMode
+        ])
+    }
+
     func updateCameraMode(roomCode: String, cameraMode: String) async throws {
         try await update(roomCode: roomCode, values: ["cameraMode": Self.safeCameraMode(cameraMode)])
     }
@@ -317,11 +410,35 @@ actor FirestoreRoomRepository: RoomRepository {
         try await update(roomCode: roomCode, values: ["gridEnabled": gridEnabled])
     }
 
+    func updateNightModeEnabled(roomCode: String, nightModeEnabled: Bool) async throws {
+        try await update(roomCode: roomCode, values: ["nightModeEnabled": nightModeEnabled])
+    }
+
+    func updateVideoHdrEnabled(roomCode: String, videoHdrEnabled: Bool) async throws {
+        try await update(roomCode: roomCode, values: ["videoHdrEnabled": videoHdrEnabled])
+    }
+
+    func updateToolbarExpanded(roomCode: String, toolbarExpanded: Bool) async throws {
+        try await update(roomCode: roomCode, values: ["toolbarExpanded": toolbarExpanded])
+    }
+
+    func updatePortraitControls(roomCode: String, blurLevel: String, strength: Int, effect: String) async throws {
+        try await update(roomCode: roomCode, values: [
+            "portraitBlurLevel": blurLevel,
+            "portraitStrength": min(7, max(1, strength)),
+            "portraitEffect": effect
+        ])
+    }
+
+    func updateSceneDetectionEnabled(roomCode: String, sceneDetectionEnabled: Bool) async throws {
+        try await update(roomCode: roomCode, values: ["sceneDetectionEnabled": sceneDetectionEnabled])
+    }
+
     func updateAspectRatioMode(roomCode: String, aspectRatioMode: String) async throws {
         try await update(roomCode: roomCode, values: ["aspectRatioMode": Self.safeAspectRatioMode(aspectRatioMode)])
     }
 
-    func updateFocusRequest(roomCode: String, x: Double, y: Double, requestId: Int, lockEnabled: Bool) async throws {
+    func updateFocusRequest(roomCode: String, x: Double, y: Double, requestId: Int64, lockEnabled: Bool) async throws {
         try await update(roomCode: roomCode, values: [
             "focusPointX": min(1.0, max(0.0, x)),
             "focusPointY": min(1.0, max(0.0, y)),
@@ -338,7 +455,7 @@ actor FirestoreRoomRepository: RoomRepository {
         let request = CaptureRequest.new(type: Self.safeCaptureRequestType(type))
         try await update(roomCode: roomCode, values: [
             "captureRequest": true,
-            "captureRequestId": request.id,
+            "captureRequestId": Int(request.id),
             "captureRequestType": request.type
         ])
     }
@@ -346,7 +463,6 @@ actor FirestoreRoomRepository: RoomRepository {
     func resetCaptureRequest(roomCode: String) async throws {
         try await update(roomCode: roomCode, values: [
             "captureRequest": false,
-            "captureRequestId": 0,
             "captureRequestType": "photo"
         ])
     }
@@ -386,20 +502,6 @@ actor FirestoreRoomRepository: RoomRepository {
         var encodedValues = values.mapValues(Self.firestoreValue)
         encodedValues["updatedAt"] = .timestamp(Date())
         try await patch(roomCode: roomCode.normalizedRoomCode, fields: encodedValues)
-    }
-
-    private func appendCandidate(_ candidate: IceCandidatePayload, field: String, roomCode: String) async throws {
-        guard var existingRoom = try await room(roomCode: roomCode) else { throw RoomRepositoryError.roomNotFound }
-        if field == "cameraCandidates" {
-            existingRoom.cameraCandidates.append(candidate)
-        } else {
-            existingRoom.controllerCandidates.append(candidate)
-        }
-        try await patch(roomCode: roomCode.normalizedRoomCode, fields: [
-            "cameraCandidates": Self.encodeCandidates(existingRoom.cameraCandidates),
-            "controllerCandidates": Self.encodeCandidates(existingRoom.controllerCandidates),
-            "updatedAt": .timestamp(Date())
-        ])
     }
 
     private func addCandidate(
@@ -460,14 +562,17 @@ actor FirestoreRoomRepository: RoomRepository {
         }
     }
 
-    private nonisolated static func makeRoomCode() -> String { String(Int.random(in: 100_000...999_999)) }
+    private nonisolated static func makeRoomCode() -> String {
+        let chars = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        return String((0..<5).compactMap { _ in chars.randomElement() })
+    }
 
     private nonisolated static func safeAspectRatioMode(_ mode: String) -> String {
-        ["full", "4:3", "square"].contains(mode) ? mode : "full"
+        ["full", "9_16", "3_4", "1_1"].contains(mode) ? mode : "full"
     }
 
     private nonisolated static func safeCameraMode(_ mode: String) -> String {
-        ["photo", "video"].contains(mode) ? mode : "photo"
+        ["photo", "video", "portrait"].contains(mode) ? mode : "photo"
     }
 
     private nonisolated static func safeFlashMode(_ mode: String) -> String {
@@ -475,7 +580,7 @@ actor FirestoreRoomRepository: RoomRepository {
     }
 
     private nonisolated static func safeCaptureRequestType(_ type: String) -> String {
-        ["photo", "video_start", "video_stop"].contains(type) ? type : "photo"
+        ["photo", "boomerang", "video_start", "video_stop", "video_pause", "video_resume"].contains(type) ? type : "photo"
     }
 
     private nonisolated static func isQuotaError(_ error: Error) -> Bool {
@@ -555,8 +660,8 @@ actor FirestoreRoomRepository: RoomRepository {
             "requestReceived": .bool(room.requestReceived),
             "controllerApproved": .bool(room.controllerApproved),
             "captureRequest": .bool(room.captureRequest != nil),
-            "captureRequestId": .integer(room.captureRequest.flatMap { Int($0.id) } ?? 0),
-            "captureRequestType": .string(room.captureRequest?.type ?? "photo"),
+            "captureRequestId": .integer(Int(room.captureRequestId)),
+            "captureRequestType": .string(room.captureRequestType),
             "cameraMode": .string(room.cameraMode),
             "aspectRatioMode": .string(room.aspectRatioMode),
             "lensFacing": .string(room.lensFacing.rawValue),
@@ -571,7 +676,7 @@ actor FirestoreRoomRepository: RoomRepository {
             "videoHdrSupported": .bool(room.videoHdrSupported),
             "videoHdrEnabled": .bool(room.videoHdrEnabled),
             "toolbarExpanded": .bool(room.toolbarExpanded),
-            "focusRequestId": .integer(room.focusRequestId),
+            "focusRequestId": .integer(Int(room.focusRequestId)),
             "focusLockEnabled": .bool(room.focusLockEnabled),
             "focusPointX": .double(room.focusPointX),
             "focusPointY": .double(room.focusPointY),
@@ -581,13 +686,35 @@ actor FirestoreRoomRepository: RoomRepository {
             "streamQualityMode": .string(room.streamQualityMode.rawValue),
             "previewWidth": .integer(room.previewWidth),
             "previewHeight": .integer(room.previewHeight),
-            "sessionVersion": .integer(room.sessionVersion),
-            "cameraCandidates": encodeCandidates(room.cameraCandidates),
-            "controllerCandidates": encodeCandidates(room.controllerCandidates),
+            "portraitBlurLevel": .string(room.portraitBlurLevel),
+            "portraitStrength": .integer(room.portraitStrength),
+            "portraitEffect": .string(room.portraitEffect),
+            "portraitStatus": .string(room.portraitStatus),
+            "portraitFaceLeft": .double(room.portraitFaceLeft),
+            "portraitFaceTop": .double(room.portraitFaceTop),
+            "portraitFaceRight": .double(room.portraitFaceRight),
+            "portraitFaceBottom": .double(room.portraitFaceBottom),
+            "faceDetected": .bool(room.faceDetected),
+            "faceCount": .integer(room.faceCount),
+            "faceDetectionTimestamp": .integer(Int(room.faceDetectionTimestamp)),
+            "faceBox": encodeFaceBounds(room.faceBox),
+            "faceBoxes": .array(room.faceBoxes.map(encodeFaceBounds)),
+            "sceneDetectionEnabled": .bool(room.sceneDetectionEnabled),
+            "sceneDetectionKey": .string(room.sceneDetection.key),
+            "sceneDetectionLabel": .string(room.sceneDetection.label),
+            "sceneDetectionSuggestion": .string(room.sceneDetection.suggestion),
+            "sceneDetectionConfidence": .double(room.sceneDetection.confidence),
+            "sceneDetectionTimestamp": .integer(Int(room.sceneDetection.timestamp)),
+            "sceneDetectionAutoAdjustment": .string(room.sceneDetection.autoAdjustment),
+            "sessionVersion": .integer(Int(room.sessionVersion)),
             "updatedAt": .timestamp(room.updatedAt)
         ]
         if let captureRequest = room.captureRequest {
-            fields["captureRequest"] = .map(["id": .string(captureRequest.id), "requestedAt": .timestamp(captureRequest.requestedAt)])
+            fields["captureRequest"] = .map([
+                "id": .integer(Int(captureRequest.id)),
+                "type": .string(captureRequest.type),
+                "requestedAt": .timestamp(captureRequest.requestedAt)
+            ])
         }
         if let offer = room.offer { fields["offer"] = .string(offer) }
         if let answer = room.answer { fields["answer"] = .string(answer) }
@@ -599,14 +726,15 @@ actor FirestoreRoomRepository: RoomRepository {
         guard let roomCode = data["roomCode"]?.stringValue else { return nil }
         let captureFields = data["captureRequest"]?.mapValue?.fields
         let captureRequest: CaptureRequest?
-        if let captureFields, let id = captureFields["id"]?.stringValue {
+        if let captureFields {
+            let id = captureFields["id"]?.int64Value ?? 0
             captureRequest = CaptureRequest(
                 id: id,
                 type: captureFields["type"]?.stringValue ?? "photo",
                 requestedAt: captureFields["requestedAt"]?.dateValue ?? Date()
             )
         } else if data["captureRequest"]?.booleanValue == true {
-            let id = data["captureRequestId"]?.stringValue ?? String(data["captureRequestId"]?.integerNumberValue ?? 0)
+            let id = data["captureRequestId"]?.int64Value ?? 0
             captureRequest = CaptureRequest(
                 id: id,
                 type: data["captureRequestType"]?.stringValue ?? "photo",
@@ -622,6 +750,8 @@ actor FirestoreRoomRepository: RoomRepository {
             requestReceived: data["requestReceived"]?.booleanValue ?? false,
             controllerApproved: data["controllerApproved"]?.booleanValue ?? false,
             captureRequest: captureRequest,
+            captureRequestId: captureRequest?.id ?? 0,
+            captureRequestType: captureRequest?.type ?? "photo",
             lensFacing: LensFacing(rawValue: data["lensFacing"]?.stringValue ?? "back") ?? .back,
             zoomLevel: data["zoomLevel"]?.numberValue ?? 1.0,
             minZoom: data["minZoom"]?.numberValue ?? 1.0,
@@ -636,7 +766,7 @@ actor FirestoreRoomRepository: RoomRepository {
             videoHdrSupported: data["videoHdrSupported"]?.booleanValue ?? false,
             videoHdrEnabled: data["videoHdrEnabled"]?.booleanValue ?? false,
             toolbarExpanded: data["toolbarExpanded"]?.booleanValue ?? false,
-            focusRequestId: data["focusRequestId"]?.integerNumberValue ?? 0,
+            focusRequestId: data["focusRequestId"]?.int64Value ?? 0,
             focusPointX: data["focusPointX"]?.numberValue ?? 0.5,
             focusPointY: data["focusPointY"]?.numberValue ?? 0.5,
             focusLockEnabled: data["focusLockEnabled"]?.booleanValue ?? false,
@@ -645,9 +775,36 @@ actor FirestoreRoomRepository: RoomRepository {
             exposureIndex: data["exposureIndex"]?.integerNumberValue ?? 0,
             streamQualityMode: StreamQualityMode(rawValue: data["streamQualityMode"]?.stringValue ?? "") ?? .lowLatency,
             rtcSessionId: data["rtcSessionId"]?.stringValue,
-            sessionVersion: data["sessionVersion"]?.integerNumberValue ?? 0,
+            sessionVersion: data["sessionVersion"]?.int64Value ?? 0,
             previewWidth: data["previewWidth"]?.integerNumberValue ?? 0,
             previewHeight: data["previewHeight"]?.integerNumberValue ?? 0,
+            portraitBlurLevel: data["portraitBlurLevel"]?.stringValue ?? "blur",
+            portraitStrength: min(7, max(1, data["portraitStrength"]?.integerNumberValue ?? 5)),
+            portraitEffect: data["portraitEffect"]?.stringValue ?? "blur",
+            portraitStatus: data["portraitStatus"]?.stringValue ?? "finding",
+            portraitFaceLeft: data["portraitFaceLeft"]?.numberValue ?? data["portraitSubjectX"]?.numberValue ?? 0,
+            portraitFaceTop: data["portraitFaceTop"]?.numberValue ?? data["portraitSubjectY"]?.numberValue ?? 0,
+            portraitFaceRight: data["portraitFaceRight"]?.numberValue ?? ((data["portraitSubjectX"]?.numberValue ?? 0) + (data["portraitSubjectWidth"]?.numberValue ?? 0)),
+            portraitFaceBottom: data["portraitFaceBottom"]?.numberValue ?? ((data["portraitSubjectY"]?.numberValue ?? 0) + (data["portraitSubjectHeight"]?.numberValue ?? 0)),
+            faceDetected: data["faceDetected"]?.booleanValue ?? false,
+            faceCount: data["faceCount"]?.integerNumberValue ?? 0,
+            faceDetectionTimestamp: data["faceDetectionTimestamp"]?.int64Value ?? 0,
+            faceBox: decodeFaceBounds(data["faceBox"]) ?? NormalizedFaceBounds(
+                left: data["faceBoxLeft"]?.numberValue ?? 0,
+                top: data["faceBoxTop"]?.numberValue ?? 0,
+                right: data["faceBoxRight"]?.numberValue ?? 0,
+                bottom: data["faceBoxBottom"]?.numberValue ?? 0
+            ),
+            faceBoxes: decodeFaceBoundsArray(data["faceBoxes"]),
+            sceneDetectionEnabled: data["sceneDetectionEnabled"]?.booleanValue ?? false,
+            sceneDetection: SceneDetectionState(
+                key: data["sceneDetectionKey"]?.stringValue ?? data["sceneKey"]?.stringValue ?? "auto",
+                label: data["sceneDetectionLabel"]?.stringValue ?? data["sceneLabel"]?.stringValue ?? "",
+                suggestion: data["sceneDetectionSuggestion"]?.stringValue ?? data["sceneSuggestion"]?.stringValue ?? "",
+                confidence: data["sceneDetectionConfidence"]?.numberValue ?? data["sceneConfidence"]?.numberValue ?? 0,
+                timestamp: data["sceneDetectionTimestamp"]?.int64Value ?? data["sceneTimestamp"]?.int64Value ?? 0,
+                autoAdjustment: data["sceneDetectionAutoAdjustment"]?.stringValue ?? data["sceneAutoAdjustment"]?.stringValue ?? ""
+            ),
             offer: data["offer"]?.stringValue,
             answer: data["answer"]?.stringValue,
             cameraCandidates: decodeCandidates(data["cameraCandidates"]),
@@ -707,6 +864,30 @@ actor FirestoreRoomRepository: RoomRepository {
               let sdpMid = fields["sdpMid"]?.stringValue else { return nil }
         let index = Int32(fields["sdpMLineIndex"]?.integerNumberValue ?? 0)
         return IceCandidatePayload(candidate: candidate, sdpMid: sdpMid, sdpMLineIndex: index)
+    }
+
+    private static func encodeFaceBounds(_ bounds: NormalizedFaceBounds) -> FirestoreValue {
+        .map([
+            "left": .double(bounds.left),
+            "top": .double(bounds.top),
+            "right": .double(bounds.right),
+            "bottom": .double(bounds.bottom)
+        ])
+    }
+
+    private static func decodeFaceBounds(_ value: FirestoreValue?) -> NormalizedFaceBounds? {
+        guard let fields = value?.mapValue?.fields else { return nil }
+        return NormalizedFaceBounds(
+            left: fields["left"]?.numberValue ?? 0,
+            top: fields["top"]?.numberValue ?? 0,
+            right: fields["right"]?.numberValue ?? 0,
+            bottom: fields["bottom"]?.numberValue ?? 0
+        )
+    }
+
+    private static func decodeFaceBoundsArray(_ value: FirestoreValue?) -> [NormalizedFaceBounds] {
+        guard let values = value?.arrayValue?.values else { return [] }
+        return values.compactMap(decodeFaceBounds)
     }
 }
 
@@ -774,6 +955,13 @@ struct FirestoreValue: Codable {
     var integerNumberValue: Int? {
         if let integerValue { return Int(integerValue) }
         if let doubleValue { return Int(doubleValue) }
+        return nil
+    }
+
+    var int64Value: Int64? {
+        if let integerValue { return Int64(integerValue) }
+        if let doubleValue { return Int64(doubleValue) }
+        if let stringValue { return Int64(stringValue) }
         return nil
     }
 
@@ -860,6 +1048,9 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
             "requestReceived": true,
             "controllerApproved": false,
             "status": RoomStatus.waitingForApproval.rawValue,
+            "captureRequest": false,
+            "captureRequestId": 0,
+            "captureRequestType": "photo",
             "offer": FieldValue.delete(),
             "answer": FieldValue.delete(),
             "rtcSessionId": FieldValue.delete()
@@ -888,7 +1079,7 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
             "controllerApproved": false,
             "status": RoomStatus.ended.rawValue,
             "captureRequest": false,
-            "captureRequestId": "0",
+            "captureRequestId": 0,
             "captureRequestType": "photo",
             "offer": FieldValue.delete(),
             "answer": FieldValue.delete(),
@@ -906,6 +1097,30 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
         ])
     }
 
+    func updateLensFacing(roomCode: String, lensFacing: LensFacing) async throws {
+        try await update(roomCode: roomCode, values: ["lensFacing": lensFacing.rawValue])
+    }
+
+    func updateZoomLevel(roomCode: String, zoomLevel: Double) async throws {
+        try await update(roomCode: roomCode, values: ["zoomLevel": max(1.0, min(8.0, zoomLevel))])
+    }
+
+    func updateZoomRange(roomCode: String, minZoom: Double, maxZoom: Double) async throws {
+        let safeMinZoom = max(1.0, minZoom)
+        try await update(roomCode: roomCode, values: [
+            "minZoom": safeMinZoom,
+            "maxZoom": max(safeMinZoom, maxZoom)
+        ])
+    }
+
+    func updateFlashMode(roomCode: String, flashMode: String) async throws {
+        let safeFlashMode = Self.safeFlashMode(flashMode)
+        try await update(roomCode: roomCode, values: [
+            "flashEnabled": safeFlashMode != "off",
+            "flashMode": safeFlashMode
+        ])
+    }
+
     func updateCameraMode(roomCode: String, cameraMode: String) async throws {
         try await update(roomCode: roomCode, values: ["cameraMode": Self.safeCameraMode(cameraMode)])
     }
@@ -914,11 +1129,35 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
         try await update(roomCode: roomCode, values: ["gridEnabled": gridEnabled])
     }
 
+    func updateNightModeEnabled(roomCode: String, nightModeEnabled: Bool) async throws {
+        try await update(roomCode: roomCode, values: ["nightModeEnabled": nightModeEnabled])
+    }
+
+    func updateVideoHdrEnabled(roomCode: String, videoHdrEnabled: Bool) async throws {
+        try await update(roomCode: roomCode, values: ["videoHdrEnabled": videoHdrEnabled])
+    }
+
+    func updateToolbarExpanded(roomCode: String, toolbarExpanded: Bool) async throws {
+        try await update(roomCode: roomCode, values: ["toolbarExpanded": toolbarExpanded])
+    }
+
+    func updatePortraitControls(roomCode: String, blurLevel: String, strength: Int, effect: String) async throws {
+        try await update(roomCode: roomCode, values: [
+            "portraitBlurLevel": blurLevel,
+            "portraitStrength": min(7, max(1, strength)),
+            "portraitEffect": effect
+        ])
+    }
+
+    func updateSceneDetectionEnabled(roomCode: String, sceneDetectionEnabled: Bool) async throws {
+        try await update(roomCode: roomCode, values: ["sceneDetectionEnabled": sceneDetectionEnabled])
+    }
+
     func updateAspectRatioMode(roomCode: String, aspectRatioMode: String) async throws {
         try await update(roomCode: roomCode, values: ["aspectRatioMode": Self.safeAspectRatioMode(aspectRatioMode)])
     }
 
-    func updateFocusRequest(roomCode: String, x: Double, y: Double, requestId: Int, lockEnabled: Bool) async throws {
+    func updateFocusRequest(roomCode: String, x: Double, y: Double, requestId: Int64, lockEnabled: Bool) async throws {
         try await update(roomCode: roomCode, values: [
             "focusPointX": min(1.0, max(0.0, x)),
             "focusPointY": min(1.0, max(0.0, y)),
@@ -943,7 +1182,6 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
     func resetCaptureRequest(roomCode: String) async throws {
         try await update(roomCode: roomCode, values: [
             "captureRequest": false,
-            "captureRequestId": "0",
             "captureRequestType": "photo"
         ])
     }
@@ -1028,8 +1266,8 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
             "requestReceived": room.requestReceived,
             "controllerApproved": room.controllerApproved,
             "captureRequest": room.captureRequest != nil,
-            "captureRequestId": room.captureRequest?.id ?? "0",
-            "captureRequestType": room.captureRequest?.type ?? "photo",
+            "captureRequestId": room.captureRequestId,
+            "captureRequestType": room.captureRequestType,
             "cameraMode": room.cameraMode,
             "aspectRatioMode": room.aspectRatioMode,
             "lensFacing": room.lensFacing.rawValue,
@@ -1054,6 +1292,26 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
             "streamQualityMode": room.streamQualityMode.rawValue,
             "previewWidth": room.previewWidth,
             "previewHeight": room.previewHeight,
+            "portraitBlurLevel": room.portraitBlurLevel,
+            "portraitStrength": room.portraitStrength,
+            "portraitEffect": room.portraitEffect,
+            "portraitStatus": room.portraitStatus,
+            "portraitFaceLeft": room.portraitFaceLeft,
+            "portraitFaceTop": room.portraitFaceTop,
+            "portraitFaceRight": room.portraitFaceRight,
+            "portraitFaceBottom": room.portraitFaceBottom,
+            "faceDetected": room.faceDetected,
+            "faceCount": room.faceCount,
+            "faceDetectionTimestamp": room.faceDetectionTimestamp,
+            "faceBox": encodeFaceBounds(room.faceBox),
+            "faceBoxes": room.faceBoxes.map(encodeFaceBounds),
+            "sceneDetectionEnabled": room.sceneDetectionEnabled,
+            "sceneDetectionKey": room.sceneDetection.key,
+            "sceneDetectionLabel": room.sceneDetection.label,
+            "sceneDetectionSuggestion": room.sceneDetection.suggestion,
+            "sceneDetectionConfidence": room.sceneDetection.confidence,
+            "sceneDetectionTimestamp": room.sceneDetection.timestamp,
+            "sceneDetectionAutoAdjustment": room.sceneDetection.autoAdjustment,
             "sessionVersion": room.sessionVersion,
             "updatedAt": Timestamp(date: room.updatedAt),
             "createdAt": Timestamp(date: Date())
@@ -1066,7 +1324,7 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
         let captureRequest: CaptureRequest?
         if (data["captureRequest"] as? Bool) == true {
             captureRequest = CaptureRequest(
-                id: String(describing: data["captureRequestId"] ?? "0"),
+                id: Self.int64Value(data["captureRequestId"]),
                 type: data["captureRequestType"] as? String ?? "photo",
                 requestedAt: Date()
             )
@@ -1079,6 +1337,8 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
             requestReceived: data["requestReceived"] as? Bool ?? false,
             controllerApproved: data["controllerApproved"] as? Bool ?? false,
             captureRequest: captureRequest,
+            captureRequestId: captureRequest?.id ?? 0,
+            captureRequestType: captureRequest?.type ?? "photo",
             lensFacing: LensFacing(rawValue: data["lensFacing"] as? String ?? "back") ?? .back,
             zoomLevel: data["zoomLevel"] as? Double ?? 1.0,
             minZoom: data["minZoom"] as? Double ?? 1.0,
@@ -1093,7 +1353,7 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
             videoHdrSupported: data["videoHdrSupported"] as? Bool ?? false,
             videoHdrEnabled: data["videoHdrEnabled"] as? Bool ?? false,
             toolbarExpanded: data["toolbarExpanded"] as? Bool ?? false,
-            focusRequestId: data["focusRequestId"] as? Int ?? 0,
+            focusRequestId: Self.int64Value(data["focusRequestId"]),
             focusPointX: data["focusPointX"] as? Double ?? 0.5,
             focusPointY: data["focusPointY"] as? Double ?? 0.5,
             focusLockEnabled: data["focusLockEnabled"] as? Bool ?? false,
@@ -1102,9 +1362,36 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
             exposureIndex: data["exposureIndex"] as? Int ?? 0,
             streamQualityMode: StreamQualityMode(rawValue: data["streamQualityMode"] as? String ?? "") ?? .lowLatency,
             rtcSessionId: data["rtcSessionId"] as? String,
-            sessionVersion: data["sessionVersion"] as? Int ?? 0,
+            sessionVersion: Self.int64Value(data["sessionVersion"]),
             previewWidth: data["previewWidth"] as? Int ?? 0,
             previewHeight: data["previewHeight"] as? Int ?? 0,
+            portraitBlurLevel: data["portraitBlurLevel"] as? String ?? "blur",
+            portraitStrength: min(7, max(1, data["portraitStrength"] as? Int ?? 5)),
+            portraitEffect: data["portraitEffect"] as? String ?? "blur",
+            portraitStatus: data["portraitStatus"] as? String ?? "finding",
+            portraitFaceLeft: data["portraitFaceLeft"] as? Double ?? data["portraitSubjectX"] as? Double ?? 0,
+            portraitFaceTop: data["portraitFaceTop"] as? Double ?? data["portraitSubjectY"] as? Double ?? 0,
+            portraitFaceRight: data["portraitFaceRight"] as? Double ?? ((data["portraitSubjectX"] as? Double ?? 0) + (data["portraitSubjectWidth"] as? Double ?? 0)),
+            portraitFaceBottom: data["portraitFaceBottom"] as? Double ?? ((data["portraitSubjectY"] as? Double ?? 0) + (data["portraitSubjectHeight"] as? Double ?? 0)),
+            faceDetected: data["faceDetected"] as? Bool ?? false,
+            faceCount: data["faceCount"] as? Int ?? 0,
+            faceDetectionTimestamp: Self.int64Value(data["faceDetectionTimestamp"]),
+            faceBox: decodeFaceBounds(data["faceBox"]) ?? NormalizedFaceBounds(
+                left: data["faceBoxLeft"] as? Double ?? 0,
+                top: data["faceBoxTop"] as? Double ?? 0,
+                right: data["faceBoxRight"] as? Double ?? 0,
+                bottom: data["faceBoxBottom"] as? Double ?? 0
+            ),
+            faceBoxes: decodeFaceBoundsArray(data["faceBoxes"]),
+            sceneDetectionEnabled: data["sceneDetectionEnabled"] as? Bool ?? false,
+            sceneDetection: SceneDetectionState(
+                key: data["sceneDetectionKey"] as? String ?? data["sceneKey"] as? String ?? "auto",
+                label: data["sceneDetectionLabel"] as? String ?? data["sceneLabel"] as? String ?? "",
+                suggestion: data["sceneDetectionSuggestion"] as? String ?? data["sceneSuggestion"] as? String ?? "",
+                confidence: data["sceneDetectionConfidence"] as? Double ?? data["sceneConfidence"] as? Double ?? 0,
+                timestamp: Self.int64Value(data["sceneDetectionTimestamp"]) != 0 ? Self.int64Value(data["sceneDetectionTimestamp"]) : Self.int64Value(data["sceneTimestamp"]),
+                autoAdjustment: data["sceneDetectionAutoAdjustment"] as? String ?? data["sceneAutoAdjustment"] as? String ?? ""
+            ),
             offer: data["offer"] as? String,
             answer: data["answer"] as? String,
             cameraCandidates: [],
@@ -1118,6 +1405,38 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
               let sdpMid = data["sdpMid"] as? String else { return nil }
         let index = data["sdpMLineIndex"] as? Int ?? 0
         return IceCandidatePayload(candidate: candidate, sdpMid: sdpMid, sdpMLineIndex: Int32(index))
+    }
+
+    private static func encodeFaceBounds(_ bounds: NormalizedFaceBounds) -> [String: Any] {
+        [
+            "left": bounds.left,
+            "top": bounds.top,
+            "right": bounds.right,
+            "bottom": bounds.bottom
+        ]
+    }
+
+    private static func decodeFaceBounds(_ value: Any?) -> NormalizedFaceBounds? {
+        guard let fields = value as? [String: Any] else { return nil }
+        return NormalizedFaceBounds(
+            left: fields["left"] as? Double ?? 0,
+            top: fields["top"] as? Double ?? 0,
+            right: fields["right"] as? Double ?? 0,
+            bottom: fields["bottom"] as? Double ?? 0
+        )
+    }
+
+    private static func decodeFaceBoundsArray(_ value: Any?) -> [NormalizedFaceBounds] {
+        guard let values = value as? [[String: Any]] else { return [] }
+        return values.compactMap(decodeFaceBounds)
+    }
+
+    private static func int64Value(_ value: Any?) -> Int64 {
+        if let value = value as? Int64 { return value }
+        if let value = value as? Int { return Int64(value) }
+        if let value = value as? NSNumber { return value.int64Value }
+        if let value = value as? String { return Int64(value) ?? 0 }
+        return 0
     }
 
     private static func decodeStatus(_ rawValue: String?) -> RoomStatus {
@@ -1138,15 +1457,16 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
     }
 
     private static func makeRoomCode() -> String {
-        String(Int.random(in: 100_000...999_999))
+        let chars = Array("ABCDEFGHJKLMNPQRSTUVWXYZ23456789")
+        return String((0..<5).compactMap { _ in chars.randomElement() })
     }
 
     private static func safeAspectRatioMode(_ mode: String) -> String {
-        ["full", "4:3", "square"].contains(mode) ? mode : "full"
+        ["full", "9_16", "3_4", "1_1"].contains(mode) ? mode : "full"
     }
 
     private static func safeCameraMode(_ mode: String) -> String {
-        ["photo", "video"].contains(mode) ? mode : "photo"
+        ["photo", "video", "portrait"].contains(mode) ? mode : "photo"
     }
 
     private static func safeFlashMode(_ mode: String) -> String {
@@ -1154,7 +1474,7 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
     }
 
     private static func safeCaptureRequestType(_ type: String) -> String {
-        ["photo", "video_start", "video_stop"].contains(type) ? type : "photo"
+        ["photo", "boomerang", "video_start", "video_stop", "video_pause", "video_resume"].contains(type) ? type : "photo"
     }
 }
 #endif
@@ -1212,6 +1532,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     private let hostVideoFrameOutput = AVCaptureVideoDataOutput()
     private let hostFrameCache = VideoFrameCache()
     private let hostMovieOutput = AVCaptureMovieFileOutput()
+    private var hostAudioInput: AVCaptureDeviceInput?
     private var pendingHostPhotoDelegates: [Int64: PhotoCaptureDelegate] = [:]
     private var hostMovieDelegate: MovieCaptureDelegate?
     private var hostRecordingSegments: [URL] = []
@@ -1326,6 +1647,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         hostRecordingCompletion = nil
         pendingRecordingLensFacing = nil
         shouldFinalizeHostRecording = false
+        hostAudioInput = nil
         isPreparingHostVideoRecording = false
         isHostVideoRecording = false
         pendingHostPhotoDelegates.removeAll()
@@ -1428,11 +1750,11 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         #endif
     }
 
-    func captureHostPhoto(completion: @escaping (UIImage?, Data?, UIDeviceOrientation, LensFacing, Bool) -> Void) {
+    func captureHostPhoto(wantsPortraitMatte: Bool = false, completion: @escaping (UIImage?, Data?, UIDeviceOrientation, LensFacing, Bool, CIImage?) -> Void) {
         #if canImport(WebRTC)
         guard role == .host, let cameraCapturer else {
             let capturedDeviceOrientation = currentDeviceCaptureOrientation()
-            completion(nil, nil, capturedDeviceOrientation, activeLensFacing, shouldUseLandscapeCanvas(photoOutput: hostPhotoOutput, capturedDeviceOrientation: capturedDeviceOrientation))
+            completion(nil, nil, capturedDeviceOrientation, activeLensFacing, shouldUseLandscapeCanvas(photoOutput: hostPhotoOutput, capturedDeviceOrientation: capturedDeviceOrientation), nil)
             return
         }
         let selectedFlashMode = activeFlashMode.safeCameraFlashMode
@@ -1441,12 +1763,13 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         let isPrepared = isHostPhotoOutputPrepared
         let settings = AVCapturePhotoSettings()
         settings.photoQualityPrioritization = .speed
+        Self.configurePortraitPhotoSettings(settings, output: hostPhotoOutput, enabled: wantsPortraitMatte)
         let uniqueID = Int64(settings.uniqueID)
         let delegate = PhotoCaptureDelegate { [weak self] image, data, diagnostics in
             Task { @MainActor in
                 self?.pendingHostPhotoDelegates[uniqueID] = nil
                 let finalUseLandscapeCanvas = diagnostics.storedLandscape
-                completion(image, data, capturedDeviceOrientation, capturedLensFacing, finalUseLandscapeCanvas)
+                completion(image, data, capturedDeviceOrientation, capturedLensFacing, finalUseLandscapeCanvas, diagnostics.portraitMask)
             }
         }
         pendingHostPhotoDelegates[uniqueID] = delegate
@@ -1473,7 +1796,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         }
         #else
         let capturedDeviceOrientation = currentDeviceCaptureOrientation()
-        completion(nil, nil, capturedDeviceOrientation, activeLensFacing, shouldUseLandscapeCanvas(photoOutput: hostPhotoOutput, capturedDeviceOrientation: capturedDeviceOrientation))
+        completion(nil, nil, capturedDeviceOrientation, activeLensFacing, shouldUseLandscapeCanvas(photoOutput: hostPhotoOutput, capturedDeviceOrientation: capturedDeviceOrientation), nil)
         #endif
     }
 
@@ -1565,6 +1888,12 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
 
     private nonisolated static func configurePhotoOutputForSpeed(_ photoOutput: AVCapturePhotoOutput) {
         photoOutput.maxPhotoQualityPrioritization = .speed
+        if photoOutput.isDepthDataDeliverySupported {
+            photoOutput.isDepthDataDeliveryEnabled = true
+        }
+        if photoOutput.isPortraitEffectsMatteDeliverySupported {
+            photoOutput.isPortraitEffectsMatteDeliveryEnabled = true
+        }
         if #available(iOS 17.0, *) {
             if photoOutput.isFastCapturePrioritizationSupported {
                 photoOutput.isFastCapturePrioritizationEnabled = true
@@ -1575,6 +1904,18 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
             if photoOutput.isZeroShutterLagSupported {
                 photoOutput.isZeroShutterLagEnabled = true
             }
+        }
+    }
+
+    private nonisolated static func configurePortraitPhotoSettings(_ settings: AVCapturePhotoSettings, output: AVCapturePhotoOutput, enabled: Bool) {
+        guard enabled else { return }
+        if output.isDepthDataDeliveryEnabled {
+            settings.isDepthDataDeliveryEnabled = true
+            settings.embedsDepthDataInPhoto = false
+        }
+        if output.isPortraitEffectsMatteDeliveryEnabled {
+            settings.isPortraitEffectsMatteDeliveryEnabled = true
+            settings.embedsPortraitEffectsMatteInPhoto = false
         }
     }
 
@@ -1712,21 +2053,112 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         }
     }
 
-    private func configureHostMovieOutput(on capturer: RTCCameraVideoCapturer) {
+    private func ensureMicrophoneAccess() async -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            return true
+        case .notDetermined:
+            guard Bundle.main.object(forInfoDictionaryKey: "NSMicrophoneUsageDescription") != nil else {
+                return false
+            }
+            return await withCheckedContinuation { continuation in
+                let lock = NSLock()
+                var didResume = false
+
+                func resume(_ granted: Bool) {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    guard !didResume else { return }
+                    didResume = true
+                    continuation.resume(returning: granted)
+                }
+
+                AVCaptureDevice.requestAccess(for: .audio) { granted in
+                    resume(granted)
+                }
+                Task {
+                    try? await Task.sleep(for: .seconds(8))
+                    resume(false)
+                }
+            }
+        case .denied, .restricted:
+            return false
+        @unknown default:
+            return false
+        }
+    }
+
+    private func configureHostMovieOutput(on capturer: RTCCameraVideoCapturer) async throws {
         let session = capturer.captureSession
-        guard !session.outputs.contains(hostMovieOutput), session.canAddOutput(hostMovieOutput) else { return }
-        session.beginConfiguration()
-        session.addOutput(hostMovieOutput)
-        session.commitConfiguration()
+        try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .videoRecording, options: [.allowBluetoothHFP, .defaultToSpeaker])
+        try AVAudioSession.sharedInstance().setActive(true)
+        let movieOutput = hostMovieOutput
+        let existingAudioInput = hostAudioInput
+        let newAudioInput: AVCaptureDeviceInput?
+        if existingAudioInput == nil {
+            guard let microphone = AVCaptureDevice.default(for: .audio) else {
+                throw AVError(.deviceNotConnected)
+            }
+            newAudioInput = try AVCaptureDeviceInput(device: microphone)
+        } else {
+            newAudioInput = nil
+        }
+
+        let configuredAudioInput = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<AVCaptureDeviceInput?, Error>) in
+            hostCaptureQueue.async {
+                var didBeginConfiguration = false
+                do {
+                    session.beginConfiguration()
+                    didBeginConfiguration = true
+                    let audioInput = existingAudioInput ?? newAudioInput
+                    if let audioInput, !session.inputs.contains(audioInput) {
+                        guard session.canAddInput(audioInput) else {
+                            throw AVError(.deviceInUseByAnotherApplication)
+                        }
+                        session.addInput(audioInput)
+                    }
+
+                    if !session.outputs.contains(movieOutput) {
+                        guard session.canAddOutput(movieOutput) else {
+                            throw WebRtcSessionError.cameraUnavailable
+                        }
+                        session.addOutput(movieOutput)
+                    }
+                    session.commitConfiguration()
+                    continuation.resume(returning: audioInput)
+                } catch {
+                    if didBeginConfiguration {
+                        session.commitConfiguration()
+                    }
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+        hostAudioInput = configuredAudioInput
     }
 
     private func removeHostMovieOutput() {
         guard let cameraCapturer else { return }
         let session = cameraCapturer.captureSession
-        guard session.outputs.contains(hostMovieOutput), !hostMovieOutput.isRecording else { return }
-        session.beginConfiguration()
-        session.removeOutput(hostMovieOutput)
-        session.commitConfiguration()
+        guard !hostMovieOutput.isRecording else { return }
+        let movieOutput = hostMovieOutput
+        let shouldRemoveOutput = session.outputs.contains(hostMovieOutput)
+        let audioInput = hostAudioInput
+        let shouldRemoveAudioInput = audioInput.map { session.inputs.contains($0) } ?? false
+        guard shouldRemoveOutput || shouldRemoveAudioInput else { return }
+        hostCaptureQueue.async { [weak self] in
+            session.beginConfiguration()
+            if shouldRemoveOutput {
+                session.removeOutput(movieOutput)
+            }
+            if let audioInput, shouldRemoveAudioInput {
+                session.removeInput(audioInput)
+            }
+            session.commitConfiguration()
+            if shouldRemoveAudioInput {
+                Task { @MainActor in self?.hostAudioInput = nil }
+            }
+        }
     }
 
     private func startHostRecordingSegment() {
@@ -1734,11 +2166,20 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         isPreparingHostVideoRecording = true
         Task { @MainActor in
             do {
+                guard Bundle.main.object(forInfoDictionaryKey: "NSMicrophoneUsageDescription") != nil else {
+                    throw WebRtcSessionError.microphoneUsageDescriptionMissing
+                }
+                guard await ensureMicrophoneAccess() else {
+                    throw WebRtcSessionError.microphonePermissionDenied
+                }
                 let cameraCapturer = try await readyCameraCapturerForRecording()
                 guard isHostVideoRecording, isPreparingHostVideoRecording else { return }
-                configureHostMovieOutput(on: cameraCapturer)
+                try await configureHostMovieOutput(on: cameraCapturer)
                 guard hostMovieOutput.connection(with: .video) != nil else {
                     throw WebRtcSessionError.cameraUnavailable
+                }
+                guard hostMovieOutput.connection(with: .audio) != nil else {
+                    throw AVError(.deviceNotConnected)
                 }
                 let url = FileManager.default.temporaryDirectory
                     .appendingPathComponent("AI-Camera-\(UUID().uuidString)")
@@ -1750,7 +2191,10 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
                 }
                 hostMovieDelegate = delegate
                 isPreparingHostVideoRecording = false
-                hostMovieOutput.startRecording(to: url, recordingDelegate: delegate)
+                let movieOutput = hostMovieOutput
+                hostCaptureQueue.async {
+                    movieOutput.startRecording(to: url, recordingDelegate: delegate)
+                }
             } catch {
                 isPreparingHostVideoRecording = false
                 finalizeHostRecording(error: error)
@@ -2238,10 +2682,27 @@ enum WebRtcRole {
     case controller
 }
 
-enum WebRtcSessionError: Error {
+enum WebRtcSessionError: LocalizedError {
     case factoryUnavailable
     case peerConnectionUnavailable
     case cameraUnavailable
+    case microphoneUsageDescriptionMissing
+    case microphonePermissionDenied
+
+    var errorDescription: String? {
+        switch self {
+        case .factoryUnavailable:
+            return "WebRTC factory is unavailable."
+        case .peerConnectionUnavailable:
+            return "WebRTC peer connection is unavailable."
+        case .cameraUnavailable:
+            return "Camera is unavailable for recording."
+        case .microphoneUsageDescriptionMissing:
+            return "Microphone usage description is missing in target Info settings."
+        case .microphonePermissionDenied:
+            return "Microphone permission was denied."
+        }
+    }
 }
 
 #if canImport(WebRTC)
@@ -2423,6 +2884,7 @@ final class CameraController: NSObject, ObservableObject {
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
     private let photoOutput = AVCapturePhotoOutput()
+    private let portraitCIContext = CIContext()
     private var isPhotoOutputPrepared = false
     private var currentInput: AVCaptureDeviceInput?
     private var pendingPhotoDelegates: [Int64: PhotoCaptureDelegate] = [:]
@@ -2547,6 +3009,12 @@ final class CameraController: NSObject, ObservableObject {
 
     private nonisolated static func configurePhotoOutputForSpeed(_ photoOutput: AVCapturePhotoOutput) {
         photoOutput.maxPhotoQualityPrioritization = .speed
+        if photoOutput.isDepthDataDeliverySupported {
+            photoOutput.isDepthDataDeliveryEnabled = true
+        }
+        if photoOutput.isPortraitEffectsMatteDeliverySupported {
+            photoOutput.isPortraitEffectsMatteDeliveryEnabled = true
+        }
         if #available(iOS 17.0, *) {
             if photoOutput.isFastCapturePrioritizationSupported {
                 photoOutput.isFastCapturePrioritizationEnabled = true
@@ -2557,6 +3025,18 @@ final class CameraController: NSObject, ObservableObject {
             if photoOutput.isZeroShutterLagSupported {
                 photoOutput.isZeroShutterLagEnabled = true
             }
+        }
+    }
+
+    private nonisolated static func configurePortraitPhotoSettings(_ settings: AVCapturePhotoSettings, output: AVCapturePhotoOutput, enabled: Bool) {
+        guard enabled else { return }
+        if output.isDepthDataDeliveryEnabled {
+            settings.isDepthDataDeliveryEnabled = true
+            settings.embedsDepthDataInPhoto = false
+        }
+        if output.isPortraitEffectsMatteDeliveryEnabled {
+            settings.isPortraitEffectsMatteDeliveryEnabled = true
+            settings.embedsPortraitEffectsMatteInPhoto = false
         }
     }
 
@@ -2576,14 +3056,27 @@ final class CameraController: NSObject, ObservableObject {
         }
     }
 
-    func saveCapturedPhotoFromStream(_ image: UIImage?, data: Data?, capturedDeviceOrientation: UIDeviceOrientation, lensFacing: LensFacing, useLandscapeCanvas: Bool) async {
+    func saveCapturedPhotoFromStream(
+        _ image: UIImage?,
+        data: Data?,
+        capturedDeviceOrientation: UIDeviceOrientation,
+        lensFacing: LensFacing,
+        useLandscapeCanvas: Bool,
+        portraitEffect: String? = nil,
+        portraitStrength: Int = 5,
+        portraitMask: CIImage? = nil
+    ) async {
         lastCapturedImage = image
-        await saveCapturedPhoto(image, data: data)
+        await saveCapturedPhoto(image, data: data, portraitEffect: portraitEffect, portraitStrength: portraitStrength, portraitMask: portraitMask)
     }
 
     func saveCapturedVideoFromStream(_ url: URL?, error: Error?) async {
         guard error == nil, let url else {
-            photoSaveMessage = "Video recording failed."
+            if let error {
+                photoSaveMessage = "Video recording failed: \(error.localizedDescription)"
+            } else {
+                photoSaveMessage = "Video recording failed."
+            }
             return
         }
         let outcome = await photoSaving.saveVideo(at: url)
@@ -2591,21 +3084,22 @@ final class CameraController: NSObject, ObservableObject {
         photoSaveMessage = outcome.message
     }
 
-    func capturePhoto(completion: ((UIImage?) -> Void)? = nil) {
+    func capturePhoto(portraitEffect: String? = nil, portraitStrength: Int = 5, completion: ((UIImage?) -> Void)? = nil) {
         let selectedFlashMode = flashMode.safeCameraFlashMode
         let capturedLensFacing = lensFacing
         let photoOutput = photoOutput
         let isPrepared = isPhotoOutputPrepared
         let settings = AVCapturePhotoSettings()
         settings.photoQualityPrioritization = .speed
+        Self.configurePortraitPhotoSettings(settings, output: photoOutput, enabled: portraitEffect != nil)
         let uniqueID = Int64(settings.uniqueID)
-        let delegate = PhotoCaptureDelegate { [weak self] image, data, _ in
+        let delegate = PhotoCaptureDelegate { [weak self] image, data, diagnostics in
             Task { @MainActor in
                 self?.lastCapturedImage = image
                 self?.pendingPhotoDelegates[uniqueID] = nil
                 completion?(image)
                 Task { @MainActor in
-                    await self?.saveCapturedPhoto(image, data: data)
+                    await self?.saveCapturedPhoto(image, data: data, portraitEffect: portraitEffect, portraitStrength: portraitStrength, portraitMask: diagnostics.portraitMask)
                 }
             }
         }
@@ -2773,7 +3267,7 @@ final class CameraController: NSObject, ObservableObject {
         throw AVError(.deviceNotConnected)
     }
 
-    private func saveCapturedPhoto(_ image: UIImage?, data originalData: Data?) async {
+    private func saveCapturedPhoto(_ image: UIImage?, data originalData: Data?, portraitEffect: String? = nil, portraitStrength: Int = 5, portraitMask: CIImage? = nil) async {
         if let image {
             lastCapturedImage = image
         }
@@ -2782,9 +3276,243 @@ final class CameraController: NSObject, ObservableObject {
             return
         }
 
-        let outcome = await photoSaving.savePhoto(originalData)
+        var photoData = originalData
+        var portraitProcessingSource: String?
+        if let portraitEffect,
+           let sourceImage = image ?? UIImage(data: originalData),
+           let processedPhoto = makePortraitJPEGData(from: sourceImage, effect: portraitEffect, strength: portraitStrength, nativeMask: portraitMask) {
+            photoData = processedPhoto.data
+            portraitProcessingSource = processedPhoto.source
+            lastCapturedImage = UIImage(data: processedPhoto.data) ?? sourceImage
+        }
+
+        let outcome = await photoSaving.savePhoto(photoData)
         lastSavedPhotoURL = outcome.localURL
-        photoSaveMessage = outcome.message
+        if portraitEffect != nil, let portraitProcessingSource {
+            photoSaveMessage = "\(outcome.message) Portrait: \(portraitProcessingSource)."
+        } else if portraitEffect != nil {
+            photoSaveMessage = "\(outcome.message) Portrait: normal fallback."
+        } else {
+            photoSaveMessage = outcome.message
+        }
+    }
+
+    private func makePortraitJPEGData(from image: UIImage, effect: String, strength: Int, nativeMask: CIImage?) -> (data: Data, source: String)? {
+        let normalizedImage = image.normalizedForPortraitProcessing()
+        guard let cgImage = normalizedImage.cgImage else { return nil }
+        let inputImage = CIImage(cgImage: cgImage)
+        let extent = inputImage.extent
+        let clampedStrength = max(1, min(7, strength))
+
+        let maskCandidate: (mask: CIImage, source: String)?
+        if let nativeMask = scaledPortraitMask(nativeMask, to: extent), isUsablePortraitMask(nativeMask, extent: extent) {
+            maskCandidate = (nativeMask, "native matte")
+        } else if let personMask = makePersonSegmentationMask(for: inputImage, orientation: .up), isUsablePortraitMask(personMask, extent: extent) {
+            maskCandidate = (personMask, "person segmentation")
+        } else if let faceMask = makeFacePortraitMask(for: inputImage, orientation: .up), isUsablePortraitMask(faceMask, extent: extent) {
+            maskCandidate = (faceMask, "face fallback")
+        } else if let saliencyMask = makeSaliencyPortraitMask(for: inputImage, orientation: .up), isUsablePortraitMask(saliencyMask, extent: extent) {
+            maskCandidate = (saliencyMask, "object saliency")
+        } else {
+            return nil
+        }
+        guard let maskCandidate else { return nil }
+        let mask = maskCandidate.mask
+
+        let blendedImage: CIImage
+        let blurRadius = 2.4 + Double(clampedStrength) * 0.9
+        let blurredImage = inputImage
+            .clampedToExtent()
+            .applyingFilter("CIGaussianBlur", parameters: ["inputRadius": blurRadius])
+            .cropped(to: extent)
+        blendedImage = CIFilter(
+            name: "CIBlendWithMask",
+            parameters: [
+                kCIInputImageKey: inputImage,
+                kCIInputBackgroundImageKey: blurredImage,
+                kCIInputMaskImageKey: mask
+            ]
+        )?.outputImage?.cropped(to: extent) ?? inputImage
+
+        let outputImage = applyPortraitEffect(to: blendedImage, effect: effect, strength: clampedStrength)
+        guard let outputCGImage = portraitCIContext.createCGImage(outputImage, from: extent),
+              let data = UIImage(cgImage: outputCGImage, scale: normalizedImage.scale, orientation: .up).jpegData(compressionQuality: 0.92)
+        else { return nil }
+        return (data, maskCandidate.source)
+    }
+
+    private func scaledPortraitMask(_ mask: CIImage?, to extent: CGRect) -> CIImage? {
+        guard let mask else { return nil }
+        guard mask.extent.width > 0, mask.extent.height > 0 else { return nil }
+        let scaleX = extent.width / mask.extent.width
+        let scaleY = extent.height / mask.extent.height
+        return mask
+            .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+            .cropped(to: extent)
+            .applyingFilter("CIGaussianBlur", parameters: ["inputRadius": 0.9])
+            .cropped(to: extent)
+    }
+
+    private func isUsablePortraitMask(_ mask: CIImage, extent: CGRect) -> Bool {
+        let averageExtent = CIVector(x: extent.minX, y: extent.minY, z: extent.width, w: extent.height)
+        guard let average = CIFilter(
+            name: "CIAreaAverage",
+            parameters: [
+                kCIInputImageKey: mask.cropped(to: extent),
+                kCIInputExtentKey: averageExtent
+            ]
+        )?.outputImage else {
+            return true
+        }
+        var pixel = [UInt8](repeating: 0, count: 4)
+        portraitCIContext.render(
+            average,
+            toBitmap: &pixel,
+            rowBytes: 4,
+            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            format: .RGBA8,
+            colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+        let coverage = Double(pixel[0]) / 255.0
+        return coverage > 0.01 && coverage < 0.96
+    }
+
+    private func makePersonSegmentationMask(for image: CIImage, orientation: UIImage.Orientation) -> CIImage? {
+        let request = VNGeneratePersonSegmentationRequest()
+        request.qualityLevel = .balanced
+        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        let handler = VNImageRequestHandler(ciImage: image, orientation: cgImagePropertyOrientation(for: orientation), options: [:])
+        do {
+            try handler.perform([request])
+            guard let pixelBuffer = request.results?.first?.pixelBuffer else { return nil }
+            let maskImage = CIImage(cvPixelBuffer: pixelBuffer)
+            let scaleX = image.extent.width / maskImage.extent.width
+            let scaleY = image.extent.height / maskImage.extent.height
+            return maskImage
+                .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+                .cropped(to: image.extent)
+                .applyingFilter("CIMorphologyMaximum", parameters: ["inputRadius": 1.0])
+                .applyingFilter("CIGaussianBlur", parameters: ["inputRadius": 0.8])
+                .cropped(to: image.extent)
+        } catch {
+            return nil
+        }
+    }
+
+    private func makeFacePortraitMask(for image: CIImage, orientation: UIImage.Orientation) -> CIImage? {
+        let request = VNDetectFaceRectanglesRequest()
+        let handler = VNImageRequestHandler(ciImage: image, orientation: cgImagePropertyOrientation(for: orientation), options: [:])
+        do {
+            try handler.perform([request])
+            guard let face = request.results?.max(by: { $0.boundingBox.width * $0.boundingBox.height < $1.boundingBox.width * $1.boundingBox.height }) else {
+                return nil
+            }
+            let box = face.boundingBox
+            let faceRect = CGRect(
+                x: box.minX * image.extent.width,
+                y: box.minY * image.extent.height,
+                width: box.width * image.extent.width,
+                height: box.height * image.extent.height
+            )
+            let centerX = faceRect.midX
+            let centerY = min(image.extent.maxY, faceRect.midY - faceRect.height * 1.25)
+            let radiusX = max(faceRect.width * 2.8, image.extent.width * 0.18)
+            let radiusY = max(faceRect.height * 4.8, image.extent.height * 0.28)
+            let radialMask = CIFilter(
+                name: "CIRadialGradient",
+                parameters: [
+                    "inputCenter": CIVector(x: centerX, y: centerY),
+                    "inputRadius0": min(radiusX, radiusY) * 0.65,
+                    "inputRadius1": max(radiusX, radiusY),
+                    "inputColor0": CIColor(red: 1, green: 1, blue: 1, alpha: 1),
+                    "inputColor1": CIColor(red: 0, green: 0, blue: 0, alpha: 1)
+                ]
+            )?.outputImage?.cropped(to: image.extent)
+            return radialMask?
+                .applyingFilter("CIGaussianBlur", parameters: ["inputRadius": 1.0])
+                .cropped(to: image.extent)
+        } catch {
+            return nil
+        }
+    }
+
+    private func makeSaliencyPortraitMask(for image: CIImage, orientation: UIImage.Orientation) -> CIImage? {
+        let request = VNGenerateObjectnessBasedSaliencyImageRequest()
+        let handler = VNImageRequestHandler(ciImage: image, orientation: cgImagePropertyOrientation(for: orientation), options: [:])
+        do {
+            try handler.perform([request])
+            guard let pixelBuffer = request.results?.first?.pixelBuffer else { return nil }
+            let maskImage = CIImage(cvPixelBuffer: pixelBuffer)
+            let scaledMask = scaledPortraitMask(maskImage, to: image.extent)
+            return scaledMask?
+                .applyingFilter("CIColorControls", parameters: ["inputContrast": 2.2, "inputBrightness": -0.18])
+                .applyingFilter("CIGaussianBlur", parameters: ["inputRadius": 1.2])
+                .cropped(to: image.extent)
+        } catch {
+            return nil
+        }
+    }
+
+    private func cgImagePropertyOrientation(for orientation: UIImage.Orientation) -> CGImagePropertyOrientation {
+        switch orientation {
+        case .up: return .up
+        case .down: return .down
+        case .left: return .left
+        case .right: return .right
+        case .upMirrored: return .upMirrored
+        case .downMirrored: return .downMirrored
+        case .leftMirrored: return .leftMirrored
+        case .rightMirrored: return .rightMirrored
+        @unknown default: return .up
+        }
+    }
+
+    private func applyPortraitEffect(to image: CIImage, effect: String, strength: Int) -> CIImage {
+        switch effect {
+        case "mono":
+            return image.applyingFilter("CIPhotoEffectMono")
+        case "low_key_mono":
+            return image
+                .applyingFilter("CIPhotoEffectNoir")
+                .applyingFilter("CIExposureAdjust", parameters: ["inputEV": -0.35])
+                .applyingFilter("CIVignette", parameters: ["inputIntensity": 0.8, "inputRadius": max(image.extent.width, image.extent.height) * 0.58])
+        case "high_key_mono":
+            return image
+                .applyingFilter("CIPhotoEffectMono")
+                .applyingFilter("CIExposureAdjust", parameters: ["inputEV": 0.4])
+        case "studio":
+            return image.applyingFilter(
+                "CIColorControls",
+                parameters: ["inputSaturation": 1.04, "inputContrast": 1.1, "inputBrightness": 0.03]
+            )
+        case "backdrop":
+            return image.applyingFilter(
+                "CIVignette",
+                parameters: ["inputIntensity": 0.65 + Double(strength) * 0.06, "inputRadius": max(image.extent.width, image.extent.height) * 0.56]
+            )
+        case "color_point":
+            return image.applyingFilter(
+                "CIColorControls",
+                parameters: ["inputSaturation": 1.28, "inputContrast": 1.08, "inputBrightness": 0.01]
+            )
+        default:
+            return image.applyingFilter(
+                "CIVignette",
+                parameters: ["inputIntensity": 0.35 + Double(strength) * 0.04, "inputRadius": max(image.extent.width, image.extent.height) * 0.68]
+            )
+        }
+    }
+}
+
+private extension UIImage {
+    func normalizedForPortraitProcessing() -> UIImage {
+        guard imageOrientation != .up else { return self }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = scale
+        format.opaque = false
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            draw(in: CGRect(origin: .zero, size: size))
+        }
     }
 }
 
@@ -2979,6 +3707,7 @@ private struct PhotoCaptureDiagnostics {
     let metadataOrientation: UInt32?
     let imageOrientation: UIImage.Orientation?
     let storedLandscape: Bool
+    let portraitMask: CIImage?
 }
 
 private final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {
@@ -2995,7 +3724,8 @@ private final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegat
                 photoHeight: 0,
                 metadataOrientation: nil,
                 imageOrientation: nil,
-                storedLandscape: false
+                storedLandscape: false,
+                portraitMask: nil
             ))
             return
         }
@@ -3011,8 +3741,20 @@ private final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegat
             photoHeight: dimensions.height,
             metadataOrientation: orientationValue,
             imageOrientation: nil,
-            storedLandscape: isStoredLandscape(width: dimensions.width, height: dimensions.height, orientationValue: orientationValue)
+            storedLandscape: isStoredLandscape(width: dimensions.width, height: dimensions.height, orientationValue: orientationValue),
+            portraitMask: portraitMask(for: photo, orientationValue: orientationValue)
         )
+    }
+
+    private static func portraitMask(for photo: AVCapturePhoto, orientationValue: UInt32?) -> CIImage? {
+        guard let matte = photo.portraitEffectsMatte else { return nil }
+        let orientedMatte: AVPortraitEffectsMatte
+        if let orientationValue, let orientation = CGImagePropertyOrientation(rawValue: orientationValue) {
+            orientedMatte = matte.applyingExifOrientation(orientation)
+        } else {
+            orientedMatte = matte
+        }
+        return CIImage(cvPixelBuffer: orientedMatte.mattingImage)
     }
 
     private static func isStoredLandscape(width: Int32, height: Int32, orientationValue: UInt32?) -> Bool {
@@ -3141,8 +3883,12 @@ struct ControllerEntryScreen: View {
         Form {
             Section("Room") {
                 TextField("Room code", text: $roomCode)
-                    .keyboardType(.numberPad)
+                    .keyboardType(.asciiCapable)
                     .textInputAutocapitalization(.characters)
+                    .autocorrectionDisabled()
+                    .onChange(of: roomCode) { value in
+                        roomCode = String(value.uppercased().filter { $0.isLetter || $0.isNumber }.prefix(5))
+                    }
 
                 Button { requestConnection() } label: {
                     Label(isRequesting ? "Requesting" : "Request Access", systemImage: "arrow.right.circle.fill")
@@ -3182,9 +3928,9 @@ struct CameraHostScreen: View {
     @StateObject private var camera = CameraController()
     @State private var room: RoomDocument?
     @State private var errorMessage: String?
-    @State private var lastHandledCaptureRequestId: String?
+    @State private var lastHandledCaptureRequestId: Int64?
     @State private var isHandlingRemoteCapture = false
-    @State private var lastHandledFocusRequestId = 0
+    @State private var lastHandledFocusRequestId: Int64 = 0
     @State private var lastAppliedExposureIndex: Int?
     @State private var focusReticlePoint: CGPoint?
     @State private var exposureValue = 0.0
@@ -3298,6 +4044,10 @@ struct CameraHostScreen: View {
                 publishCurrentControls()
             }
 
+            CameraCircleButton(systemName: "sparkles", isSelected: room?.sceneDetectionEnabled == true) {
+                updateSceneDetectionEnabled(!(room?.sceneDetectionEnabled ?? false))
+            }
+
             CameraCircleButton(systemName: "square.grid.3x3", isSelected: room?.gridEnabled == true) {
                 updateGridEnabled(!(room?.gridEnabled ?? false))
             }
@@ -3340,6 +4090,16 @@ struct CameraHostScreen: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 8)
             .background(Color.black.opacity(0.42), in: Capsule())
+
+            if let hostInsightText {
+                Text(hostInsightText)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.86))
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(Color.black.opacity(0.42), in: Capsule())
+            }
 
             if let errorMessage { Text(errorMessage).font(.footnote).foregroundStyle(.red) }
 
@@ -3389,6 +4149,18 @@ struct CameraHostScreen: View {
         case .disconnected: return "Disconnected"
         case .ended: return "Session ended"
         }
+    }
+
+    private var hostInsightText: String? {
+        guard let room else { return nil }
+        if room.cameraMode == "portrait" {
+            return "Portrait \(room.portraitEffect.replacingOccurrences(of: "_", with: " ").capitalized) \(room.portraitStrength)/7"
+        }
+        if room.sceneDetectionEnabled {
+            let label = room.sceneLabel.isEmpty ? "Scene detection ready" : room.sceneLabel
+            return room.sceneSuggestion.isEmpty ? label : "\(label): \(room.sceneSuggestion)"
+        }
+        return nil
     }
 
     private func observeRoom() async {
@@ -3462,6 +4234,8 @@ struct CameraHostScreen: View {
             return
         }
         isHandlingRemoteCapture = true
+        let portraitEffect = room?.cameraMode == "portrait" ? room?.portraitEffect : nil
+        let portraitStrength = room?.portraitStrength ?? 5
 
         Task {
             switch request.type {
@@ -3478,20 +4252,23 @@ struct CameraHostScreen: View {
             default:
                 resetCaptureRequest()
                 if services.webRtcSession.state != .idle {
-                    services.webRtcSession.captureHostPhoto { image, data, capturedDeviceOrientation, lensFacing, useLandscapeCanvas in
+                    services.webRtcSession.captureHostPhoto(wantsPortraitMatte: portraitEffect != nil) { image, data, capturedDeviceOrientation, lensFacing, useLandscapeCanvas, portraitMask in
                         Task {
                             await camera.saveCapturedPhotoFromStream(
                                 image,
                                 data: data,
                                 capturedDeviceOrientation: capturedDeviceOrientation,
                                 lensFacing: lensFacing,
-                                useLandscapeCanvas: useLandscapeCanvas
+                                useLandscapeCanvas: useLandscapeCanvas,
+                                portraitEffect: portraitEffect,
+                                portraitStrength: portraitStrength,
+                                portraitMask: portraitMask
                             )
                         }
                         isHandlingRemoteCapture = false
                     }
                 } else {
-                    camera.capturePhoto { _ in
+                    camera.capturePhoto(portraitEffect: portraitEffect, portraitStrength: portraitStrength) { _ in
                         isHandlingRemoteCapture = false
                     }
                 }
@@ -3580,6 +4357,10 @@ struct CameraHostScreen: View {
         Task { try? await services.roomRepository.updateGridEnabled(roomCode: roomCode, gridEnabled: enabled) }
     }
 
+    private func updateSceneDetectionEnabled(_ enabled: Bool) {
+        Task { try? await services.roomRepository.updateSceneDetectionEnabled(roomCode: roomCode, sceneDetectionEnabled: enabled) }
+    }
+
     private func updateAspectRatioMode(_ mode: String) {
         Task { try? await services.roomRepository.updateAspectRatioMode(roomCode: roomCode, aspectRatioMode: mode) }
     }
@@ -3627,6 +4408,9 @@ struct WaitingForApprovalScreen: View {
     @State private var controllerPreviewSwitching = false
     @State private var controllerLensSwitchTask: Task<Void, Never>?
     @State private var controllerPreviewSwitchStartFrameCount = 0
+    @State private var showZoomBar = false
+    @State private var showManualExposure = false
+    @State private var showPortraitControls = false
 
     var body: some View {
         ZStack {
@@ -3800,22 +4584,50 @@ struct WaitingForApprovalScreen: View {
 
     private var controllerControls: some View {
         VStack(spacing: 14) {
-            zoomStrip
+            if showManualExposure {
+                manualExposurePanel
+            } else if showPortraitControls && cameraMode == "portrait" {
+                portraitControlsPanel
+            } else if showZoomBar {
+                zoomStrip
+            } else {
+                zoomPresetStrip
+            }
 
-            HStack {
-                Spacer()
-                shutterButton
-                Spacer()
+            if isVideoRecording {
+                recordingControls
+            } else {
+                HStack(spacing: 34) {
+                    if cameraMode == "video" {
+                        videoHdrButton
+                    } else {
+                        portraitToggleButton
+                    }
+
+                    shutterButton
+
+                    CameraCircleButton(
+                        systemName: lensFacing == .back ? "camera.rotate" : "camera.rotate.fill",
+                        size: 58
+                    ) {
+                        switchControllerLens()
+                    }
+                }
             }
 
             HStack(spacing: 18) {
                 modeButton("video", label: "Video")
                 modeButton("photo", label: "Photo")
+                modeButton("portrait", label: "Portrait")
             }
             .font(.caption.weight(.medium))
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
             .background(Color.black.opacity(0.42), in: Capsule())
+
+            if isVideoRecording {
+                recordingStatusPill
+            }
 
             if let captureFeedback {
                 Text(captureFeedback)
@@ -3832,6 +4644,189 @@ struct WaitingForApprovalScreen: View {
                     .foregroundStyle(.red)
                     .multilineTextAlignment(.center)
             }
+        }
+    }
+
+    private var zoomPresetStrip: some View {
+        HStack(spacing: 10) {
+            ForEach(commonZoomOptions, id: \.self) { option in
+                let isSelected = abs(zoomLevel - option) < 0.08
+                Button {
+                    zoomLevel = option
+                    publishControls()
+                } label: {
+                    Text(String(format: option.truncatingRemainder(dividingBy: 1) == 0 ? "%.0fx" : "%.1fx", option))
+                        .font(.caption.monospacedDigit().weight(isSelected ? .bold : .semibold))
+                        .foregroundStyle(isSelected ? .black : .white)
+                        .frame(minWidth: 42, minHeight: 34)
+                        .background(isSelected ? Color.white : Color.black.opacity(0.5), in: Capsule())
+                        .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+                .simultaneousGesture(LongPressGesture(minimumDuration: 0.35).onEnded { _ in
+                    withAnimation(.easeInOut(duration: 0.18)) { showZoomBar = true }
+                })
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.black.opacity(0.36), in: Capsule())
+    }
+
+    private var commonZoomOptions: [Double] {
+        let maximumZoom = room?.maxZoom ?? 8.0
+        return [1.0, 2.0, 3.0, 5.0].filter { $0 <= max(maximumZoom, 1.0) }
+    }
+
+    private var manualExposurePanel: some View {
+        VStack(spacing: 10) {
+            HStack {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.18)) { showManualExposure = false }
+                } label: {
+                    Image(systemName: "xmark")
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Text(exposureLabel)
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(.white)
+
+                Spacer()
+
+                Button {
+                    exposureValue = 0
+                    publishExposureDebounced(0)
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.plain)
+            }
+
+            Slider(value: $exposureValue, in: -1.0...1.0, step: 0.125)
+                .tint(.yellow)
+                .onChange(of: exposureValue) { value in publishExposureDebounced(value) }
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.52), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.18), lineWidth: 1))
+    }
+
+    private var exposureLabel: String {
+        String(format: "EV %+.1f", exposureValue * 4.0)
+    }
+
+    private var portraitControlsPanel: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 8) {
+                ForEach(Array(1...7), id: \.self) { strength in
+                    let isSelected = (room?.portraitStrength ?? 5) == strength
+                    Button {
+                        updatePortraitControls(strength: strength, effect: room?.portraitEffect ?? "blur")
+                    } label: {
+                        Text("\(strength)")
+                            .font(.caption.weight(.semibold))
+                            .frame(width: 38, height: 32)
+                            .background(isSelected ? Color.white : Color.black.opacity(0.4), in: Capsule())
+                            .foregroundStyle(isSelected ? .black : .white)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(["blur", "studio", "mono", "backdrop", "low_key_mono", "high_key_mono", "color_point"], id: \.self) { effect in
+                        let isSelected = (room?.portraitEffect ?? "blur") == effect
+                        Button {
+                            updatePortraitControls(strength: room?.portraitStrength ?? 5, effect: effect)
+                        } label: {
+                            Text(portraitEffectLabel(effect))
+                                .font(.caption2.weight(.semibold))
+                                .padding(.horizontal, 10)
+                                .frame(height: 30)
+                                .background(isSelected ? Color.white : Color.black.opacity(0.4), in: Capsule())
+                                .foregroundStyle(isSelected ? .black : .white)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.52), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.18), lineWidth: 1))
+    }
+
+    private func portraitEffectLabel(_ effect: String) -> String {
+        switch effect {
+        case "low_key_mono": return "Low Key"
+        case "high_key_mono": return "High Key"
+        case "color_point": return "Color"
+        default: return effect.capitalized
+        }
+    }
+
+    private var recordingControls: some View {
+        HStack(spacing: 22) {
+            CameraCircleButton(systemName: "stop.fill", size: 64, role: .destructive) {
+                requestCapture()
+            }
+
+            CameraCircleButton(
+                systemName: lensFacing == .back ? "camera.rotate" : "camera.rotate.fill",
+                size: 54
+            ) {
+                switchControllerLens()
+            }
+        }
+    }
+
+    private var recordingStatusPill: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(.red)
+                .frame(width: 7, height: 7)
+            Text("Recording")
+                .font(.caption2.weight(.semibold))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(Color.black.opacity(0.48), in: Capsule())
+    }
+
+    private var portraitToggleButton: some View {
+        CameraCircleButton(
+            systemName: "person.crop.rectangle",
+            size: 58,
+            isSelected: showPortraitControls && cameraMode == "portrait"
+        ) {
+            if cameraMode != "portrait" {
+                updateCameraMode("portrait")
+            }
+            withAnimation(.easeInOut(duration: 0.18)) {
+                showManualExposure = false
+                showZoomBar = false
+                showPortraitControls.toggle()
+            }
+        }
+    }
+
+    private var videoHdrButton: some View {
+        CameraCircleButton(
+            systemName: "h.square",
+            size: 58,
+            isSelected: room?.videoHdrEnabled == true
+        ) {
+            updateVideoHdrEnabled(!(room?.videoHdrEnabled ?? false))
         }
     }
 
@@ -3856,6 +4851,18 @@ struct WaitingForApprovalScreen: View {
             ) {
                 flashMode = flashMode.nextCameraFlashMode
                 publishControls()
+            }
+
+            CameraCircleButton(systemName: "sun.max", isSelected: showManualExposure) {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showZoomBar = false
+                    showPortraitControls = false
+                    showManualExposure.toggle()
+                }
+            }
+
+            CameraCircleButton(systemName: "sparkles", isSelected: room?.sceneDetectionEnabled == true) {
+                updateSceneDetectionEnabled(!(room?.sceneDetectionEnabled ?? false))
             }
 
             CameraCircleButton(systemName: "square.grid.3x3", isSelected: room?.gridEnabled == true) {
@@ -4143,6 +5150,11 @@ struct WaitingForApprovalScreen: View {
         if mode != "video" {
             isVideoRecording = false
         }
+        if mode != "portrait" {
+            showPortraitControls = false
+        }
+        showManualExposure = false
+        showZoomBar = false
         Task {
             do {
                 if shouldStopActiveVideo {
@@ -4195,6 +5207,41 @@ struct WaitingForApprovalScreen: View {
         }
     }
 
+    private func updateVideoHdrEnabled(_ enabled: Bool) {
+        Task {
+            do {
+                try await services.roomRepository.updateVideoHdrEnabled(roomCode: roomCode, videoHdrEnabled: enabled)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func updatePortraitControls(strength: Int, effect: String) {
+        Task {
+            do {
+                try await services.roomRepository.updatePortraitControls(
+                    roomCode: roomCode,
+                    blurLevel: room?.portraitBlurLevel ?? "blur",
+                    strength: strength,
+                    effect: effect
+                )
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func updateSceneDetectionEnabled(_ enabled: Bool) {
+        Task {
+            do {
+                try await services.roomRepository.updateSceneDetectionEnabled(roomCode: roomCode, sceneDetectionEnabled: enabled)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     private func updateAspectRatioMode(_ mode: String) {
         Task {
             do {
@@ -4220,7 +5267,7 @@ struct WaitingForApprovalScreen: View {
                     roomCode: roomCode,
                     x: x,
                     y: y,
-                    requestId: Int(Date().timeIntervalSince1970 * 1000),
+                    requestId: Int64(Date().timeIntervalSince1970 * 1000),
                     lockEnabled: false
                 )
             } catch {

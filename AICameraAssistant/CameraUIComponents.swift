@@ -277,32 +277,36 @@ struct FocusExposureOverlay: View {
 extension String {
     var nextCameraAspectRatioMode: String {
         switch self {
-        case "full": return "4:3"
-        case "4:3": return "square"
+        case "full": return "9_16"
+        case "9_16": return "3_4"
+        case "3_4": return "1_1"
         default: return "full"
         }
     }
 
     var cameraAspectRatioLabel: String {
         switch self {
-        case "4:3": return "4:3"
-        case "square": return "1:1"
+        case "9_16": return "9:16"
+        case "3_4": return "3:4"
+        case "1_1": return "1:1"
         default: return "Full"
         }
     }
 
     var cameraAspectRatioValue: CGFloat? {
         switch self {
-        case "4:3": return 3.0 / 4.0
-        case "square": return 1.0
+        case "9_16": return 9.0 / 16.0
+        case "3_4": return 3.0 / 4.0
+        case "1_1": return 1.0
         default: return nil
         }
     }
 
     var cameraPreviewAspectRatio: CGFloat {
         switch self {
-        case "4:3": return 3.0 / 4.0
-        case "square": return 1.0
+        case "9_16": return 9.0 / 16.0
+        case "3_4": return 3.0 / 4.0
+        case "1_1": return 1.0
         default: return 9.0 / 16.0
         }
     }
