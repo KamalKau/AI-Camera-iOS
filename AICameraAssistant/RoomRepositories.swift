@@ -304,19 +304,19 @@ actor LocalRoomRepository: RoomRepository {
     }
 
     private nonisolated static func safeAspectRatioMode(_ mode: String) -> String {
-        ["full", "9_16", "3_4", "1_1"].contains(mode) ? mode : "full"
+        RoomSchema.safeAspectRatioMode(mode)
     }
 
     private nonisolated static func safeCameraMode(_ mode: String) -> String {
-        ["photo", "video", "portrait"].contains(mode) ? mode : "photo"
+        RoomSchema.safeCameraMode(mode)
     }
 
     private nonisolated static func safeFlashMode(_ mode: String) -> String {
-        ["off", "auto", "on"].contains(mode) ? mode : "off"
+        RoomSchema.safeFlashMode(mode)
     }
 
     private nonisolated static func safeCaptureRequestType(_ type: String) -> String {
-        ["photo", "boomerang", "video_start", "video_stop", "video_pause", "video_resume"].contains(type) ? type : "photo"
+        RoomSchema.safeCaptureRequestType(type)
     }
 
     private nonisolated static func clampedUnit(_ value: Double) -> Double {
@@ -574,7 +574,7 @@ actor FirestoreRoomRepository: RoomRepository {
         let request = CaptureRequest.new(type: Self.safeCaptureRequestType(type))
         try await update(roomCode: roomCode, values: [
             "captureRequest": true,
-            "captureRequestId": Int(request.id),
+            "captureRequestId": request.id,
             "captureRequestType": request.type
         ])
     }
@@ -688,19 +688,19 @@ actor FirestoreRoomRepository: RoomRepository {
     }
 
     private nonisolated static func safeAspectRatioMode(_ mode: String) -> String {
-        ["full", "9_16", "3_4", "1_1"].contains(mode) ? mode : "full"
+        RoomSchema.safeAspectRatioMode(mode)
     }
 
     private nonisolated static func safeCameraMode(_ mode: String) -> String {
-        ["photo", "video", "portrait"].contains(mode) ? mode : "photo"
+        RoomSchema.safeCameraMode(mode)
     }
 
     private nonisolated static func safeFlashMode(_ mode: String) -> String {
-        ["off", "auto", "on"].contains(mode) ? mode : "off"
+        RoomSchema.safeFlashMode(mode)
     }
 
     private nonisolated static func safeCaptureRequestType(_ type: String) -> String {
-        ["photo", "boomerang", "video_start", "video_stop", "video_pause", "video_resume"].contains(type) ? type : "photo"
+        RoomSchema.safeCaptureRequestType(type)
     }
 
     private nonisolated static func clampedUnit(_ value: Double) -> Double {
@@ -793,7 +793,7 @@ actor FirestoreRoomRepository: RoomRepository {
             "requestReceived": .bool(room.requestReceived),
             "controllerApproved": .bool(room.controllerApproved),
             "captureRequest": .bool(room.captureRequest != nil),
-            "captureRequestId": .integer(Int(room.captureRequestId)),
+            "captureRequestId": .integer(room.captureRequestId),
             "captureRequestType": .string(room.captureRequestType),
             "cameraMode": .string(room.cameraMode),
             "aspectRatioMode": .string(room.aspectRatioMode),
@@ -809,7 +809,7 @@ actor FirestoreRoomRepository: RoomRepository {
             "videoHdrSupported": .bool(room.videoHdrSupported),
             "videoHdrEnabled": .bool(room.videoHdrEnabled),
             "toolbarExpanded": .bool(room.toolbarExpanded),
-            "focusRequestId": .integer(Int(room.focusRequestId)),
+            "focusRequestId": .integer(room.focusRequestId),
             "focusLockEnabled": .bool(room.focusLockEnabled),
             "focusPointX": .double(room.focusPointX),
             "focusPointY": .double(room.focusPointY),
@@ -829,7 +829,7 @@ actor FirestoreRoomRepository: RoomRepository {
             "portraitFaceBottom": .double(room.portraitFaceBottom),
             "faceDetected": .bool(room.faceDetected),
             "faceCount": .integer(room.faceCount),
-            "faceDetectionTimestamp": .integer(Int(room.faceDetectionTimestamp)),
+            "faceDetectionTimestamp": .integer(room.faceDetectionTimestamp),
             "faceBox": encodeFaceBounds(room.faceBox),
             "faceBoxes": .array(room.faceBoxes.map(encodeFaceBounds)),
             "sceneDetectionEnabled": .bool(room.sceneDetectionEnabled),
@@ -837,18 +837,11 @@ actor FirestoreRoomRepository: RoomRepository {
             "sceneDetectionLabel": .string(room.sceneDetection.label),
             "sceneDetectionSuggestion": .string(room.sceneDetection.suggestion),
             "sceneDetectionConfidence": .double(room.sceneDetection.confidence),
-            "sceneDetectionTimestamp": .integer(Int(room.sceneDetection.timestamp)),
+            "sceneDetectionTimestamp": .integer(room.sceneDetection.timestamp),
             "sceneDetectionAutoAdjustment": .string(room.sceneDetection.autoAdjustment),
-            "sessionVersion": .integer(Int(room.sessionVersion)),
+            "sessionVersion": .integer(room.sessionVersion),
             "updatedAt": .timestamp(room.updatedAt)
         ]
-        if let captureRequest = room.captureRequest {
-            fields["captureRequest"] = .map([
-                "id": .integer(Int(captureRequest.id)),
-                "type": .string(captureRequest.type),
-                "requestedAt": .timestamp(captureRequest.requestedAt)
-            ])
-        }
         if let offer = room.offer { fields["offer"] = .string(offer) }
         if let answer = room.answer { fields["answer"] = .string(answer) }
         if let rtcSessionId = room.rtcSessionId { fields["rtcSessionId"] = .string(rtcSessionId) }
@@ -1113,6 +1106,10 @@ struct FirestoreValue: Codable {
     }
 
     static func integer(_ value: Int) -> FirestoreValue {
+        FirestoreValue(integerValue: String(value))
+    }
+
+    static func integer(_ value: Int64) -> FirestoreValue {
         FirestoreValue(integerValue: String(value))
     }
 
@@ -1514,10 +1511,16 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
         guard let roomCode = data["roomCode"] as? String else { return nil }
         let flashMode = Self.safeFlashMode(data["flashMode"] as? String ?? ((data["flashEnabled"] as? Bool) == true ? "on" : "off"))
         let captureRequest: CaptureRequest?
-        if (data["captureRequest"] as? Bool) == true {
+        if let captureFields = data["captureRequest"] as? [String: Any] {
+            captureRequest = CaptureRequest(
+                id: Self.int64Value(captureFields["id"]),
+                type: captureFields["type"] as? String ?? RoomSchema.defaultCaptureRequestType,
+                requestedAt: (captureFields["requestedAt"] as? Timestamp)?.dateValue() ?? Date()
+            )
+        } else if (data["captureRequest"] as? Bool) == true {
             captureRequest = CaptureRequest(
                 id: Self.int64Value(data["captureRequestId"]),
-                type: data["captureRequestType"] as? String ?? "photo",
+                type: data["captureRequestType"] as? String ?? RoomSchema.defaultCaptureRequestType,
                 requestedAt: Date()
             )
         } else {
@@ -1654,19 +1657,19 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
     }
 
     private static func safeAspectRatioMode(_ mode: String) -> String {
-        ["full", "9_16", "3_4", "1_1"].contains(mode) ? mode : "full"
+        RoomSchema.safeAspectRatioMode(mode)
     }
 
     private static func safeCameraMode(_ mode: String) -> String {
-        ["photo", "video", "portrait"].contains(mode) ? mode : "photo"
+        RoomSchema.safeCameraMode(mode)
     }
 
     private static func safeFlashMode(_ mode: String) -> String {
-        ["off", "auto", "on"].contains(mode) ? mode : "off"
+        RoomSchema.safeFlashMode(mode)
     }
 
     private static func safeCaptureRequestType(_ type: String) -> String {
-        ["photo", "boomerang", "video_start", "video_stop", "video_pause", "video_resume"].contains(type) ? type : "photo"
+        RoomSchema.safeCaptureRequestType(type)
     }
 
     private static func clampedUnit(_ value: Double) -> Double {

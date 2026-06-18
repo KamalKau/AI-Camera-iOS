@@ -93,8 +93,7 @@ struct CameraHostScreen: View {
                     FocusExposureOverlay(point: focusReticlePoint, exposureValue: $exposureValue)
                 }
             }
-            .aspectRatio((room?.aspectRatioMode ?? "full").cameraPreviewAspectRatio, contentMode: .fit)
-            .frame(maxWidth: .infinity)
+            .cameraPreviewFrame(aspectRatioMode: room?.aspectRatioMode ?? "full")
             .clipped()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

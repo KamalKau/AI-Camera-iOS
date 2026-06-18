@@ -133,8 +133,7 @@ struct WaitingForApprovalScreen: View {
                         )
                     }
                 }
-                .aspectRatio((room?.aspectRatioMode ?? "full").cameraPreviewAspectRatio, contentMode: .fit)
-                .frame(maxWidth: .infinity)
+                .cameraPreviewFrame(aspectRatioMode: room?.aspectRatioMode ?? "full")
                 .clipped()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

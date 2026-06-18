@@ -30,16 +30,23 @@ extension String {
         }
     }
 
-    func avCaptureFlashMode(supportedModes: [AVCaptureDevice.FlashMode]) -> AVCaptureDevice.FlashMode? {
+    func avCaptureFlashMode(supportedModes: [AVCaptureDevice.FlashMode], lensFacing: LensFacing) -> AVCaptureDevice.FlashMode? {
         let requestedMode: AVCaptureDevice.FlashMode
         switch safeCameraFlashMode {
-        case "auto": requestedMode = .auto
-        case "on": requestedMode = .on
-        default: requestedMode = .off
+        case "auto":
+            requestedMode = lensFacing == .front ? .off : .auto
+        case "on":
+            requestedMode = .on
+        default:
+            requestedMode = .off
         }
         if supportedModes.contains(requestedMode) {
             return requestedMode
         }
         return supportedModes.contains(.off) ? .off : nil
+    }
+
+    func avCaptureFlashMode(supportedModes: [AVCaptureDevice.FlashMode]) -> AVCaptureDevice.FlashMode? {
+        avCaptureFlashMode(supportedModes: supportedModes, lensFacing: .back)
     }
 }

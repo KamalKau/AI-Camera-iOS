@@ -26,13 +26,45 @@ enum StreamQualityMode: String, Codable, Sendable {
     case quality
 }
 
+enum RoomSchema {
+    nonisolated static let defaultAspectRatioMode = "full"
+    nonisolated static let defaultCameraMode = "photo"
+    nonisolated static let defaultCaptureRequestType = "photo"
+    nonisolated static let defaultFlashMode = "off"
+    nonisolated static let defaultSceneDetectionKey = "auto"
+    nonisolated static let aspectRatioModes = ["full", "9_16", "3_4", "1_1"]
+    nonisolated static let cameraModes = ["photo", "video", "portrait"]
+    nonisolated static let flashModes = ["off", "auto", "on"]
+    nonisolated static let captureRequestTypes = ["photo", "boomerang", "video_start", "video_stop", "video_pause", "video_resume"]
+
+    nonisolated static func safeAspectRatioMode(_ mode: String) -> String {
+        aspectRatioModes.contains(mode) ? mode : defaultAspectRatioMode
+    }
+
+    nonisolated static func safeCameraMode(_ mode: String) -> String {
+        cameraModes.contains(mode) ? mode : defaultCameraMode
+    }
+
+    nonisolated static func safeFlashMode(_ mode: String) -> String {
+        flashModes.contains(mode) ? mode : defaultFlashMode
+    }
+
+    nonisolated static func safeCaptureRequestType(_ type: String) -> String {
+        captureRequestTypes.contains(type) ? type : defaultCaptureRequestType
+    }
+
+    nonisolated static func timestampId() -> Int64 {
+        Int64(Date().timeIntervalSince1970 * 1000)
+    }
+}
+
 struct CaptureRequest: Codable, Equatable, Sendable {
     var id: Int64
     var type: String
     var requestedAt: Date
 
     nonisolated static func new(type: String = "photo") -> CaptureRequest {
-        CaptureRequest(id: Int64(Date().timeIntervalSince1970 * 1000), type: type, requestedAt: Date())
+        CaptureRequest(id: RoomSchema.timestampId(), type: RoomSchema.safeCaptureRequestType(type), requestedAt: Date())
     }
 }
 
@@ -106,7 +138,7 @@ struct SceneDetectionState: Codable, Equatable, Sendable {
     var autoAdjustment: String
 
     nonisolated static let empty = SceneDetectionState(
-        key: "auto",
+        key: RoomSchema.defaultSceneDetectionKey,
         label: "",
         suggestion: "",
         confidence: 0,
@@ -185,16 +217,16 @@ struct RoomDocument: Codable, Equatable, Sendable {
             controllerApproved: false,
             captureRequest: nil,
             captureRequestId: 0,
-            captureRequestType: "photo",
+            captureRequestType: RoomSchema.defaultCaptureRequestType,
             lensFacing: .back,
             zoomLevel: 1.0,
             minZoom: 1.0,
             maxZoom: 8.0,
             flashEnabled: false,
-            flashMode: "off",
+            flashMode: RoomSchema.defaultFlashMode,
             flashSupported: true,
-            cameraMode: "photo",
-            aspectRatioMode: "full",
+            cameraMode: RoomSchema.defaultCameraMode,
+            aspectRatioMode: RoomSchema.defaultAspectRatioMode,
             gridEnabled: false,
             nightModeEnabled: false,
             videoHdrSupported: false,

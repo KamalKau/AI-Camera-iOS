@@ -258,7 +258,7 @@ final class CameraController: NSObject, ObservableObject {
         pendingPhotoDelegates[uniqueID] = delegate
         sessionQueue.async { [weak self] in
             let performCapture = {
-                if let flashMode = selectedFlashMode.avCaptureFlashMode(supportedModes: photoOutput.supportedFlashModes) {
+                if let flashMode = selectedFlashMode.avCaptureFlashMode(supportedModes: photoOutput.supportedFlashModes, lensFacing: capturedLensFacing) {
                     settings.flashMode = flashMode
                 }
                 configurePhotoConnection(photoOutput, lensFacing: capturedLensFacing)

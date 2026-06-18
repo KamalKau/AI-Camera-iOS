@@ -59,7 +59,7 @@ final class PreviewContainerView: UIView {
     func updatePreviewConnection() {
         guard let connection = previewLayer.connection else { return }
         if connection.isVideoOrientationSupported {
-            let orientation = AVCaptureVideoOrientation.currentPreviewOrientation(lensFacing: lensFacing)
+            let orientation = AVCaptureVideoOrientation.currentPreviewOrientation()
             if lastAppliedVideoOrientation != orientation {
                 connection.videoOrientation = orientation
                 lastAppliedVideoOrientation = orientation
@@ -81,16 +81,14 @@ final class PreviewContainerView: UIView {
 }
 
 private extension AVCaptureVideoOrientation {
-    static func currentPreviewOrientation(lensFacing: LensFacing) -> AVCaptureVideoOrientation {
-        switch UIDevice.current.orientation {
+    static func currentPreviewOrientation() -> AVCaptureVideoOrientation {
+        switch currentInterfaceCaptureOrientation() {
         case .landscapeLeft:
             return .landscapeRight
         case .landscapeRight:
             return .landscapeLeft
         case .portraitUpsideDown:
             return .portraitUpsideDown
-        case .portrait:
-            return .portrait
         default:
             return .portrait
         }
@@ -270,6 +268,18 @@ struct FocusExposureOverlay: View {
         }
         if shouldCommit {
             onExposureCommitted(nextValue)
+        }
+    }
+}
+
+extension View {
+    @ViewBuilder
+    func cameraPreviewFrame(aspectRatioMode: String) -> some View {
+        if aspectRatioMode == "full" {
+            frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            aspectRatio(aspectRatioMode.cameraPreviewAspectRatio, contentMode: .fit)
+                .frame(maxWidth: .infinity)
         }
     }
 }

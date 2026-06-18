@@ -38,6 +38,10 @@ struct WebRtcStreamProfile {
     let fps: Int
     let minBitrate: Int
     let maxBitrate: Int
+
+    func adjusted(for lensFacing: LensFacing) -> WebRtcStreamProfile {
+        self
+    }
 }
 
 extension StreamQualityMode {

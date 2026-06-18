@@ -21,13 +21,21 @@ extension UIImage {
 }
 
 func configurePhotoConnection(_ photoOutput: AVCapturePhotoOutput, lensFacing: LensFacing) {
-    guard let connection = photoOutput.connection(with: .video) else { return }
+    configureCaptureConnection(photoOutput.connection(with: .video), lensFacing: lensFacing)
+}
+
+func configureMovieConnection(_ movieOutput: AVCaptureMovieFileOutput, lensFacing: LensFacing) {
+    configureCaptureConnection(movieOutput.connection(with: .video), lensFacing: lensFacing, mirrorsFrontCamera: false)
+}
+
+private func configureCaptureConnection(_ connection: AVCaptureConnection?, lensFacing: LensFacing, mirrorsFrontCamera: Bool = true) {
+    guard let connection else { return }
     if connection.isVideoOrientationSupported {
         connection.videoOrientation = currentCaptureVideoOrientation()
     }
     if connection.isVideoMirroringSupported {
         connection.automaticallyAdjustsVideoMirroring = false
-        connection.isVideoMirrored = lensFacing == .front
+        connection.isVideoMirrored = mirrorsFrontCamera && lensFacing == .front
     }
 }
 
