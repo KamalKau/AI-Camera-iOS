@@ -211,10 +211,14 @@ final class CameraController: NSObject, ObservableObject {
         portraitMask: CIImage? = nil,
         saveToPhotoLibrary: Bool = true
     ) async {
-        lastCapturedImage = image
+        let adjustedImage = image ?? data.flatMap(UIImage.init(data:))
+        let adjustedData = useLandscapeCanvas
+            ? adjustedImage?.landscapeFourThreeJPEGData() ?? data
+            : data
+        lastCapturedImage = adjustedImage
         await saveCapturedPhoto(
-            image,
-            data: data,
+            adjustedImage,
+            data: adjustedData,
             portraitEffect: portraitEffect,
             portraitStrength: portraitStrength,
             portraitMask: portraitMask,

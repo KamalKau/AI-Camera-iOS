@@ -18,6 +18,26 @@ extension UIImage {
             draw(in: CGRect(origin: .zero, size: size))
         }
     }
+
+    func landscapeFourThreeJPEGData(compressionQuality: CGFloat = 0.94) -> Data? {
+        let sourceImage = normalizedForSaving()
+        guard sourceImage.size.width > sourceImage.size.height else { return nil }
+        let targetSize = CGSize(width: sourceImage.size.width, height: sourceImage.size.width * 3.0 / 4.0)
+        guard targetSize.height > sourceImage.size.height else { return nil }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: targetSize, format: format).image { _ in
+            let scale = max(targetSize.width / sourceImage.size.width, targetSize.height / sourceImage.size.height)
+            let scaledSize = CGSize(width: sourceImage.size.width * scale, height: sourceImage.size.height * scale)
+            let origin = CGPoint(
+                x: (targetSize.width - scaledSize.width) / 2.0,
+                y: (targetSize.height - scaledSize.height) / 2.0
+            )
+            sourceImage.draw(in: CGRect(origin: origin, size: scaledSize))
+        }.jpegData(compressionQuality: compressionQuality)
+    }
 }
 
 func configurePhotoConnection(_ photoOutput: AVCapturePhotoOutput, lensFacing: LensFacing) {
