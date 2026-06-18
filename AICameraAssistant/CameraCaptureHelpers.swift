@@ -28,6 +28,7 @@ func configureMovieConnection(_ movieOutput: AVCaptureMovieFileOutput, lensFacin
     configureCaptureConnection(movieOutput.connection(with: .video), lensFacing: lensFacing, mirrorsFrontCamera: false)
 }
 
+
 private func configureCaptureConnection(_ connection: AVCaptureConnection?, lensFacing: LensFacing, mirrorsFrontCamera: Bool = true) {
     guard let connection else { return }
     if connection.isVideoOrientationSupported {

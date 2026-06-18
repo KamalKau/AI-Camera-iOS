@@ -351,7 +351,7 @@ final class CameraController: NSObject, ObservableObject {
                             session.addOutput(photoOutput)
                         }
                     }
-                    session.commitConfiguration()
+                        session.commitConfiguration()
                     Self.preparePhotoOutput(photoOutput) {
                         Task { @MainActor in self.isPhotoOutputPrepared = true }
                     }

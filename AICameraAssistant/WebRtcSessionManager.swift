@@ -890,7 +890,6 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     }
 
     private func prewarmHostCaptureOutputsIfPossible() {
-        #if canImport(WebRTC)
         guard role == .host, let cameraCapturer else { return }
         let photoOutput = hostPhotoOutput
         hostCaptureQueue.async {
@@ -904,7 +903,6 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         Task { @MainActor in
             try? await self.configureHostMovieOutput(on: cameraCapturer, activateAudioSession: false)
         }
-        #endif
     }
 
     private nonisolated static func startCaptureOnCapturer(
