@@ -49,6 +49,54 @@ struct NormalizedFaceBounds: Codable, Equatable, Sendable {
     }
 }
 
+struct CaptureRequestState: Codable, Equatable, Sendable {
+    var isRequested: Bool
+    var id: Int64
+    var type: String
+
+    nonisolated static let empty = CaptureRequestState(isRequested: false, id: 0, type: "photo")
+}
+
+struct FocusRequestState: Codable, Equatable, Sendable {
+    var requestId: Int64
+    var pointX: Double
+    var pointY: Double
+    var lockEnabled: Bool
+
+    nonisolated static let centered = FocusRequestState(requestId: 0, pointX: 0.5, pointY: 0.5, lockEnabled: false)
+}
+
+struct ExposureState: Codable, Equatable, Sendable {
+    var minIndex: Int
+    var maxIndex: Int
+    var currentIndex: Int
+
+    nonisolated static let zero = ExposureState(minIndex: 0, maxIndex: 0, currentIndex: 0)
+}
+
+struct PortraitSubjectState: Codable, Equatable, Sendable {
+    var status: String
+    var faceBounds: NormalizedFaceBounds
+
+    nonisolated static let finding = PortraitSubjectState(status: "finding", faceBounds: .zero)
+}
+
+struct FaceDetectionOverlayState: Codable, Equatable, Sendable {
+    var detected: Bool
+    var count: Int
+    var timestamp: Int64
+    var primaryBox: NormalizedFaceBounds
+    var boxes: [NormalizedFaceBounds]
+
+    nonisolated static let empty = FaceDetectionOverlayState(
+        detected: false,
+        count: 0,
+        timestamp: 0,
+        primaryBox: .zero,
+        boxes: []
+    )
+}
+
 struct SceneDetectionState: Codable, Equatable, Sendable {
     var key: String
     var label: String
@@ -213,21 +261,48 @@ protocol RoomRepository: Sendable {
     func updateVideoHdrEnabled(roomCode: String, videoHdrEnabled: Bool) async throws
     func updateToolbarExpanded(roomCode: String, toolbarExpanded: Bool) async throws
     func updatePortraitControls(roomCode: String, blurLevel: String, strength: Int, effect: String) async throws
+    func updatePortraitSubjectState(roomCode: String, state: PortraitSubjectState) async throws
+    func updateFaceDetectionOverlay(roomCode: String, state: FaceDetectionOverlayState) async throws
     func updateSceneDetectionEnabled(roomCode: String, sceneDetectionEnabled: Bool) async throws
+    func updateSceneDetectionState(roomCode: String, state: SceneDetectionState) async throws
     func updateAspectRatioMode(roomCode: String, aspectRatioMode: String) async throws
     func updateFocusRequest(roomCode: String, x: Double, y: Double, requestId: Int64, lockEnabled: Bool) async throws
+    func updateExposureState(roomCode: String, state: ExposureState) async throws
     func updateExposureIndex(roomCode: String, exposureIndex: Int) async throws
+    func updateFlashSupported(roomCode: String, flashSupported: Bool) async throws
+    func updatePreviewSize(roomCode: String, width: Int, height: Int) async throws
     func requestCapture(roomCode: String, type: String) async throws
     func resetCaptureRequest(roomCode: String) async throws
     func setOffer(_ sdp: String, roomCode: String, rtcSessionId: String) async throws
     func setAnswer(_ sdp: String, roomCode: String, rtcSessionId: String) async throws
     func addCameraCandidate(_ candidate: IceCandidatePayload, roomCode: String, rtcSessionId: String) async throws
     func addControllerCandidate(_ candidate: IceCandidatePayload, roomCode: String, rtcSessionId: String) async throws
+    func clearIceCandidates(roomCode: String) async throws
     func cameraCandidates(roomCode: String, rtcSessionId: String?) async throws -> [IceCandidatePayload]
     func controllerCandidates(roomCode: String, rtcSessionId: String?) async throws -> [IceCandidatePayload]
 }
 
 extension RoomDocument {
+    var captureRequestState: CaptureRequestState {
+        CaptureRequestState(isRequested: captureRequest != nil, id: captureRequestId, type: captureRequestType)
+    }
+
+    var focusRequestState: FocusRequestState {
+        FocusRequestState(requestId: focusRequestId, pointX: focusPointX, pointY: focusPointY, lockEnabled: focusLockEnabled)
+    }
+
+    var exposureState: ExposureState {
+        ExposureState(minIndex: exposureMinIndex, maxIndex: exposureMaxIndex, currentIndex: exposureIndex)
+    }
+
+    var portraitSubjectState: PortraitSubjectState {
+        PortraitSubjectState(status: portraitStatus, faceBounds: NormalizedFaceBounds(left: portraitFaceLeft, top: portraitFaceTop, right: portraitFaceRight, bottom: portraitFaceBottom))
+    }
+
+    var faceDetectionOverlayState: FaceDetectionOverlayState {
+        FaceDetectionOverlayState(detected: faceDetected, count: faceCount, timestamp: faceDetectionTimestamp, primaryBox: faceBox, boxes: faceBoxes)
+    }
+
     var portraitSubjectX: Double { portraitFaceLeft }
     var portraitSubjectY: Double { portraitFaceTop }
     var portraitSubjectWidth: Double { max(0, portraitFaceRight - portraitFaceLeft) }

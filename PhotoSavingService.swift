@@ -9,6 +9,8 @@ struct PhotoSaveOutcome: Sendable {
 protocol PhotoSaving: Sendable {
     func prewarm() async
     func savePhoto(_ data: Data) async -> PhotoSaveOutcome
+    func savePhotoToAppStorage(_ data: Data) async -> PhotoSaveOutcome
+    func savePhotoToCameraRoll(_ data: Data) async -> PhotoSaveOutcome
     func saveVideo(at url: URL) async -> PhotoSaveOutcome
 }
 
@@ -26,26 +28,43 @@ struct PhotoLibrarySavingService: PhotoSaving {
     }
 
     func savePhoto(_ data: Data) async -> PhotoSaveOutcome {
-        let localURL: URL?
-        do {
-            localURL = try await saveToDocuments(data)
-        } catch {
-            localURL = nil
-        }
+        let localOutcome = await savePhotoToAppStorage(data)
 
         guard Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryAddUsageDescription") != nil else {
             return PhotoSaveOutcome(
-                localURL: localURL,
+                localURL: localOutcome.localURL,
                 message: "Saved in app storage. Add Photos permission to save to Camera Roll."
             )
         }
 
         do {
             try await savePhotoToLibrary(data)
-            return PhotoSaveOutcome(localURL: localURL, message: "Saved to Photos.")
+            return PhotoSaveOutcome(localURL: localOutcome.localURL, message: "Saved to Photos.")
         } catch {
-            let prefix = localURL == nil ? "Photo captured, but local save failed." : "Saved in app storage."
-            return PhotoSaveOutcome(localURL: localURL, message: "\(prefix) Photos save failed: \(error.localizedDescription)")
+            let prefix = localOutcome.localURL == nil ? "Photo captured, but local save failed." : "Saved in app storage."
+            return PhotoSaveOutcome(localURL: localOutcome.localURL, message: "\(prefix) Photos save failed: \(error.localizedDescription)")
+        }
+    }
+
+    func savePhotoToAppStorage(_ data: Data) async -> PhotoSaveOutcome {
+        do {
+            let localURL = try await saveToDocuments(data)
+            return PhotoSaveOutcome(localURL: localURL, message: "Saved in app storage. Adding to Photos in background.")
+        } catch {
+            return PhotoSaveOutcome(localURL: nil, message: "Photo captured, but local save failed: \(error.localizedDescription)")
+        }
+    }
+
+    func savePhotoToCameraRoll(_ data: Data) async -> PhotoSaveOutcome {
+        guard Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryAddUsageDescription") != nil else {
+            return PhotoSaveOutcome(localURL: nil, message: "Add Photos permission to save to Camera Roll.")
+        }
+
+        do {
+            try await savePhotoToLibrary(data)
+            return PhotoSaveOutcome(localURL: nil, message: "Saved to Photos.")
+        } catch {
+            return PhotoSaveOutcome(localURL: nil, message: "Photos save failed: \(error.localizedDescription)")
         }
     }
 

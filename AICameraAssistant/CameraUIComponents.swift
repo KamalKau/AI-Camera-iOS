@@ -332,6 +332,10 @@ struct RemoteVideoView: UIViewRepresentable {
         context.coordinator.update(track: track, renderer: uiView)
     }
 
+    static func dismantleUIView(_ uiView: RTCMTLVideoView, coordinator: Coordinator) {
+        coordinator.detach(renderer: uiView)
+    }
+
     func makeCoordinator() -> Coordinator {
         Coordinator()
     }
@@ -341,9 +345,14 @@ struct RemoteVideoView: UIViewRepresentable {
 
         func update(track: RTCVideoTrack?, renderer: RTCMTLVideoView) {
             guard currentTrack !== track else { return }
-            currentTrack?.remove(renderer)
+            detach(renderer: renderer)
             currentTrack = track
             track?.add(renderer)
+        }
+
+        func detach(renderer: RTCMTLVideoView) {
+            currentTrack?.remove(renderer)
+            currentTrack = nil
         }
     }
 }
