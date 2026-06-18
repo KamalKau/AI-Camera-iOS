@@ -10,6 +10,10 @@ final class AppServices: ObservableObject {
     let webRtcSession: WebRtcSessionManager
     private var webRtcCancellable: AnyCancellable?
 
+    var roomCreator: any RoomCreating { roomRepository }
+    var roomReader: any RoomReading { roomRepository }
+    var roomConnectionManager: any RoomConnectionManaging { roomRepository }
+
     init() {
         self.roomRepository = Self.makeRoomRepository()
         self.webRtcSession = WebRtcSessionManager()

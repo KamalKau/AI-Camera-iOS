@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		FE00498C2FE38A410071E0C5 /* StreamHealthMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE00498B2FE38A410071E0C5 /* StreamHealthMonitor.swift */; };
 		FE30198E2FC382CA00E6BEBB /* FirebaseAnalytics in Frameworks */ = {isa = PBXBuildFile; productRef = FE30198D2FC382CA00E6BEBB /* FirebaseAnalytics */; };
 		FE3019912FC3834300E6BEBB /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = FE3019902FC3834300E6BEBB /* FirebaseCore */; };
 		FE3019932FC3834C00E6BEBB /* FirebaseFirestore in Frameworks */ = {isa = PBXBuildFile; productRef = FE3019922FC3834C00E6BEBB /* FirebaseFirestore */; };
@@ -16,6 +17,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		FE00498B2FE38A410071E0C5 /* StreamHealthMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamHealthMonitor.swift; sourceTree = "<group>"; };
 		FE5B7D4F2FC2AE8C00105CEC /* AICameraAssistant.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AICameraAssistant.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		FEE82D3C2FD8F1FB00B8CF03 /* PhotoSavingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoSavingService.swift; sourceTree = "<group>"; };
 		FEE82D3E2FD8F23800B8CF03 /* CameraFlashMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraFlashMode.swift; sourceTree = "<group>"; };
@@ -91,6 +93,7 @@
 				FE30198F2FC3834300E6BEBB /* Frameworks */,
 				FEE82D3C2FD8F1FB00B8CF03 /* PhotoSavingService.swift */,
 				FEE82D3E2FD8F23800B8CF03 /* CameraFlashMode.swift */,
+				FE00498B2FE38A410071E0C5 /* StreamHealthMonitor.swift */,
 			);
 			sourceTree = "<group>";
 		};
@@ -185,6 +188,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				FEE82D3D2FD8F1FC00B8CF03 /* PhotoSavingService.swift in Sources */,
+				FE00498C2FE38A410071E0C5 /* StreamHealthMonitor.swift in Sources */,
 				FEE82D3F2FD8F23800B8CF03 /* CameraFlashMode.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

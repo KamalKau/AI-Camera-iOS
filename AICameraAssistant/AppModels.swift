@@ -242,14 +242,23 @@ extension String {
     }
 }
 
-protocol RoomRepository: Sendable {
+protocol RoomCreating: Sendable {
     func createRoom() async throws -> RoomDocument
+}
+
+protocol RoomReading: Sendable {
     func room(roomCode: String) async throws -> RoomDocument?
     func observeRoom(roomCode: String) async -> AsyncThrowingStream<RoomDocument, Error>
+}
+
+protocol RoomConnectionManaging: Sendable {
     func requestConnection(roomCode: String) async throws
     func approveController(roomCode: String) async throws
     func denyController(roomCode: String) async throws
     func endSession(roomCode: String) async throws
+}
+
+protocol RoomCameraControlUpdating: Sendable {
     func updateControls(roomCode: String, lensFacing: LensFacing, zoomLevel: Double, flashMode: String) async throws
     func updateLensFacing(roomCode: String, lensFacing: LensFacing) async throws
     func updateZoomLevel(roomCode: String, zoomLevel: Double) async throws
@@ -271,8 +280,14 @@ protocol RoomRepository: Sendable {
     func updateExposureIndex(roomCode: String, exposureIndex: Int) async throws
     func updateFlashSupported(roomCode: String, flashSupported: Bool) async throws
     func updatePreviewSize(roomCode: String, width: Int, height: Int) async throws
+}
+
+protocol RoomCaptureRequesting: Sendable {
     func requestCapture(roomCode: String, type: String) async throws
     func resetCaptureRequest(roomCode: String) async throws
+}
+
+protocol RoomSignaling: Sendable {
     func setOffer(_ sdp: String, roomCode: String, rtcSessionId: String) async throws
     func setAnswer(_ sdp: String, roomCode: String, rtcSessionId: String) async throws
     func addCameraCandidate(_ candidate: IceCandidatePayload, roomCode: String, rtcSessionId: String) async throws
@@ -281,6 +296,10 @@ protocol RoomRepository: Sendable {
     func cameraCandidates(roomCode: String, rtcSessionId: String?) async throws -> [IceCandidatePayload]
     func controllerCandidates(roomCode: String, rtcSessionId: String?) async throws -> [IceCandidatePayload]
 }
+
+protocol RoomSignalingRepository: RoomReading, RoomSignaling {}
+
+protocol RoomRepository: RoomCreating, RoomConnectionManaging, RoomCameraControlUpdating, RoomCaptureRequesting, RoomSignalingRepository {}
 
 extension RoomDocument {
     var captureRequestState: CaptureRequestState {
