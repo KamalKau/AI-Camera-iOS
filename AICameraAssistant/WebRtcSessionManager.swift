@@ -514,6 +514,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
                         guard let self, self.captureSwitchGeneration == switchGeneration else { return }
                         self.activeCaptureDevice = device
                         self.activeLensFacing = lensFacing
+                        self.publishPreviewSize(profile)
                         self.isRestartingCapture = false
                         self.capturedLensCommitTask?.cancel()
                         self.capturedLensCommitTask = Task { @MainActor in
@@ -878,15 +879,24 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         lensFacing: LensFacing,
         commitCapturedLensImmediately: Bool = true
     ) throws {
-        let device = try Self.startCaptureOnCapturer(capturer, lensFacing: lensFacing, profile: streamQualityMode.webRtcProfile.adjusted(for: lensFacing))
+        let profile = streamQualityMode.webRtcProfile.adjusted(for: lensFacing)
+        let device = try Self.startCaptureOnCapturer(capturer, lensFacing: lensFacing, profile: profile)
         activeCaptureDevice = device
         activeLensFacing = lensFacing
+        publishPreviewSize(profile)
         if commitCapturedLensImmediately {
             capturedLensFacing = lensFacing
         }
         applyDeviceControls(zoomLevel: activeZoomLevel)
         applyExposureOnDevice(device, exposureIndex: activeExposureIndex)
         prewarmHostCaptureOutputsIfPossible()
+    }
+
+    private func publishPreviewSize(_ profile: WebRtcStreamProfile) {
+        guard let roomCode, let repository = repository as? any RoomCameraControlUpdating else { return }
+        Task {
+            try? await repository.updatePreviewSize(roomCode: roomCode, width: profile.width, height: profile.height)
+        }
     }
 
     private func prewarmHostCaptureOutputsIfPossible() {
@@ -996,7 +1006,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
 
     private func configureVideoSender(_ sender: RTCRtpSender) {
         let parameters = sender.parameters
-        let profile = streamQualityMode.webRtcProfile
+        let profile = streamQualityMode.webRtcProfile.adjusted(for: activeLensFacing)
         parameters.encodings.forEach { encoding in
             encoding.minBitrateBps = NSNumber(value: profile.minBitrate)
             encoding.maxBitrateBps = NSNumber(value: profile.maxBitrate)

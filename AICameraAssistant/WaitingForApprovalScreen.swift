@@ -32,6 +32,7 @@ struct WaitingForApprovalScreen: View {
     @State private var showZoomBar = false
     @State private var showManualExposure = false
     @State private var showPortraitControls = false
+    @State private var ignoreFocusTapUntil = Date.distantPast
 
     var body: some View {
         ZStack {
@@ -80,64 +81,91 @@ struct WaitingForApprovalScreen: View {
 
     private var previewSurface: some View {
         GeometryReader { geometry in
-            ZStack {
+            let layout = ControllerPreviewLayout(
+                containerSize: geometry.size,
+                aspectRatioMode: room?.aspectRatioMode ?? "full",
+                sourceWidth: room?.previewWidth ?? 0,
+                sourceHeight: room?.previewHeight ?? 0
+            )
+
+            ZStack(alignment: .topLeading) {
                 Color.black
 
-                ZStack {
-                    #if canImport(WebRTC)
-                    if let remoteVideoTrack = services.webRtcSession.remoteVideoTrack {
-                        let isSwitchingLens = controllerPreviewSwitching
-                        RemoteVideoView(track: remoteVideoTrack, isMirrored: controllerPreviewLensFacing == .front)
-                            .transaction { transaction in
-                                transaction.animation = nil
-                            }
-                            .overlay {
-                                if isSwitchingLens {
-                                    CameraSwitchingOverlay()
-                                }
-                            }
-                    } else {
-                        previewStatusOverlay
-                    }
-                    #else
-                    previewStatusOverlay
-                    #endif
-                }
-                .overlay {
-                    if room?.gridEnabled == true {
-                        CameraGridOverlay()
-                    }
-                }
-                .overlay {
-                    GeometryReader { previewGeometry in
-                        Color.clear
-                            .contentShape(Rectangle())
-                            .simultaneousGesture(
-                                DragGesture(minimumDistance: 0)
-                                    .onEnded { value in
-                                        guard room?.controllerApproved == true else { return }
-                                        let x = min(1.0, max(0.0, value.location.x / max(previewGeometry.size.width, 1)))
-                                        let y = min(1.0, max(0.0, value.location.y / max(previewGeometry.size.height, 1)))
-                                        sendFocusRequest(x: x, y: y)
-                                    }
-                            )
-                    }
-                }
-                .overlay {
-                    if let focusReticlePoint {
-                        FocusExposureOverlay(
-                            point: focusReticlePoint,
-                            exposureValue: $exposureValue,
-                            isInteractive: true,
-                            onExposureCommitted: publishExposureDebounced
-                        )
-                    }
-                }
-                .cameraPreviewFrame(aspectRatioMode: room?.aspectRatioMode ?? "full")
-                .clipped()
+                controllerPreviewContent(layout: layout)
+                    .frame(width: layout.visibleRect.width, height: layout.visibleRect.height)
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(previewFocusGesture(layout: layout))
+                    .position(x: layout.visibleRect.midX, y: layout.visibleRect.midY)
+                    .clipped()
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .position(x: geometry.size.width / 2, y: geometry.size.height / 2)
+            .frame(width: geometry.size.width, height: geometry.size.height)
+        }
+    }
+
+    private func previewFocusGesture(layout: ControllerPreviewLayout) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onEnded { value in
+                guard room?.controllerApproved == true, Date.now >= ignoreFocusTapUntil else { return }
+                guard abs(value.translation.width) < 8, abs(value.translation.height) < 8 else { return }
+                let localPoint = value.location
+                guard layout.localBounds.contains(localPoint) else { return }
+                sendFocusRequest(
+                    sourcePoint: layout.sourcePoint(for: localPoint),
+                    displayPoint: layout.displayPoint(for: localPoint)
+                )
+            }
+    }
+
+    private func updateFocusTapSuppression(isInteracting: Bool) {
+        ignoreFocusTapUntil = Date.now.addingTimeInterval(isInteracting ? 0.35 : 0.12)
+    }
+
+    @ViewBuilder
+    private func controllerPreviewContent(layout: ControllerPreviewLayout) -> some View {
+        ZStack {
+            #if canImport(WebRTC)
+            if let remoteVideoTrack = services.webRtcSession.remoteVideoTrack {
+                RemoteVideoView(track: remoteVideoTrack, isMirrored: controllerPreviewLensFacing == .front)
+                    .transaction { transaction in
+                        transaction.animation = nil
+                    }
+            } else {
+                previewStatusOverlay
+            }
+            #else
+            previewStatusOverlay
+            #endif
+
+            if room?.gridEnabled == true {
+                CameraGridOverlay()
+            }
+
+            if let room {
+                ControllerFaceOverlay(
+                    state: room.faceDetectionOverlayState,
+                    videoDrawRect: layout.videoDrawRectInVisibleRect,
+                    isMirrored: controllerPreviewLensFacing == .front
+                )
+            }
+
+            if let focusReticlePoint {
+                FocusExposureOverlay(
+                    point: focusReticlePoint,
+                    exposureValue: $exposureValue,
+                    isInteractive: true,
+                    onExposureChanged: publishExposureDebounced,
+                    onExposureCommitted: publishExposureDebounced,
+                    onInteractionChanged: updateFocusTapSuppression
+                )
+            }
+
+            if let message = previewConnectionOverlayText {
+                ControllerPreviewConnectionOverlay(message: message)
+            }
+
+            if controllerPreviewSwitching {
+                CameraSwitchingOverlay()
+            }
         }
     }
 
@@ -176,6 +204,21 @@ struct WaitingForApprovalScreen: View {
         }
         .padding(16)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var previewConnectionOverlayText: String? {
+        guard room?.controllerApproved == true else { return nil }
+        if firstFrameRetryCount > 0 {
+            return "Reconnecting preview"
+        }
+        switch services.webRtcSession.state {
+        case .connecting, .waitingForVideo:
+            return services.webRtcSession.remoteVideoTrack == nil ? nil : "Weak network"
+        case .failed:
+            return "Connection lost"
+        default:
+            return nil
+        }
     }
 
     private var previewStatusText: String {
@@ -870,12 +913,11 @@ struct WaitingForApprovalScreen: View {
         }
     }
 
-    private func sendFocusRequest(x: Double, y: Double) {
-        let point = CGPoint(x: x, y: y)
-        focusReticlePoint = point
+    private func sendFocusRequest(sourcePoint: CGPoint, displayPoint: CGPoint) {
+        focusReticlePoint = displayPoint
         Task {
             try? await Task.sleep(for: .milliseconds(1600))
-            if focusReticlePoint == point {
+            if focusReticlePoint == displayPoint {
                 focusReticlePoint = nil
             }
         }
@@ -883,8 +925,8 @@ struct WaitingForApprovalScreen: View {
             do {
                 try await services.roomRepository.updateFocusRequest(
                     roomCode: roomCode,
-                    x: x,
-                    y: y,
+                    x: sourcePoint.x,
+                    y: sourcePoint.y,
                     requestId: Int64(Date().timeIntervalSince1970 * 1000),
                     lockEnabled: false
                 )
@@ -908,5 +950,136 @@ struct WaitingForApprovalScreen: View {
                 await MainActor.run { errorMessage = error.localizedDescription }
             }
         }
+    }
+}
+
+private struct ControllerPreviewLayout {
+    let containerSize: CGSize
+    let aspectRatioMode: String
+    let sourceWidth: Int
+    let sourceHeight: Int
+
+    var visibleRect: CGRect {
+        guard containerSize.width > 0, containerSize.height > 0 else { return .zero }
+        guard aspectRatioMode != "full" else {
+            return CGRect(origin: .zero, size: containerSize)
+        }
+        let targetAspect = aspectRatioMode.cameraPreviewAspectRatio
+        let containerAspect = containerSize.width / max(containerSize.height, 1)
+        let size: CGSize
+        if containerAspect > targetAspect {
+            size = CGSize(width: containerSize.height * targetAspect, height: containerSize.height)
+        } else {
+            size = CGSize(width: containerSize.width, height: containerSize.width / targetAspect)
+        }
+        return CGRect(
+            x: (containerSize.width - size.width) / 2.0,
+            y: (containerSize.height - size.height) / 2.0,
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    var localBounds: CGRect {
+        CGRect(origin: .zero, size: visibleRect.size)
+    }
+
+    var videoDrawRectInVisibleRect: CGRect {
+        let bounds = localBounds
+        guard bounds.width > 0, bounds.height > 0 else { return .zero }
+        let sourceAspect = CGFloat(sourceWidth > 0 && sourceHeight > 0 ? Double(sourceWidth) / Double(sourceHeight) : 16.0 / 9.0)
+        let boundsAspect = bounds.width / max(bounds.height, 1)
+        let size: CGSize
+        if boundsAspect > sourceAspect {
+            size = CGSize(width: bounds.width, height: bounds.width / sourceAspect)
+        } else {
+            size = CGSize(width: bounds.height * sourceAspect, height: bounds.height)
+        }
+        return CGRect(
+            x: (bounds.width - size.width) / 2.0,
+            y: (bounds.height - size.height) / 2.0,
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    func sourcePoint(for localPoint: CGPoint) -> CGPoint {
+        let videoRect = videoDrawRectInVisibleRect
+        guard videoRect.width > 0, videoRect.height > 0 else { return .zero }
+        return CGPoint(
+            x: min(1.0, max(0.0, (localPoint.x - videoRect.minX) / videoRect.width)),
+            y: min(1.0, max(0.0, (localPoint.y - videoRect.minY) / videoRect.height))
+        )
+    }
+
+    func displayPoint(for localPoint: CGPoint) -> CGPoint {
+        let bounds = localBounds
+        guard bounds.width > 0, bounds.height > 0 else { return .zero }
+        return CGPoint(
+            x: min(1.0, max(0.0, localPoint.x / bounds.width)),
+            y: min(1.0, max(0.0, localPoint.y / bounds.height))
+        )
+    }
+}
+
+private struct ControllerFaceOverlay: View {
+    let state: FaceDetectionOverlayState
+    let videoDrawRect: CGRect
+    let isMirrored: Bool
+
+    private var boxes: [NormalizedFaceBounds] {
+        let validBoxes = state.boxes.filter(\.isValid)
+        if !validBoxes.isEmpty { return validBoxes }
+        return state.primaryBox.isValid ? [state.primaryBox] : []
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .topLeading) {
+                ForEach(Array(boxes.enumerated()), id: \.offset) { _, box in
+                    let rect = displayRect(for: box, canvasSize: geometry.size)
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(.yellow, lineWidth: 1.5)
+                        .frame(width: rect.width, height: rect.height)
+                        .position(x: rect.midX, y: rect.midY)
+                }
+            }
+            .clipped()
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func displayRect(for box: NormalizedFaceBounds, canvasSize: CGSize) -> CGRect {
+        let left = CGFloat(isMirrored ? 1.0 - box.right : box.left)
+        let right = CGFloat(isMirrored ? 1.0 - box.left : box.right)
+        let top = CGFloat(box.top)
+        let bottom = CGFloat(box.bottom)
+        let rect = CGRect(
+            x: videoDrawRect.minX + left * videoDrawRect.width,
+            y: videoDrawRect.minY + top * videoDrawRect.height,
+            width: max(0, (right - left) * videoDrawRect.width),
+            height: max(0, (bottom - top) * videoDrawRect.height)
+        )
+        return rect.intersection(CGRect(origin: .zero, size: canvasSize))
+    }
+}
+
+private struct ControllerPreviewConnectionOverlay: View {
+    let message: String
+
+    var body: some View {
+        VStack(spacing: 8) {
+            ProgressView()
+                .tint(.white)
+            Text(message)
+                .font(.caption.weight(.semibold))
+                .multilineTextAlignment(.center)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.52), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.18), lineWidth: 1))
+        .allowsHitTesting(false)
     }
 }

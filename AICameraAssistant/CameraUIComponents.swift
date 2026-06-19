@@ -181,6 +181,7 @@ struct FocusExposureOverlay: View {
     var isInteractive = false
     var onExposureChanged: (Double) -> Void = { _ in }
     var onExposureCommitted: (Double) -> Void = { _ in }
+    var onInteractionChanged: (Bool) -> Void = { _ in }
 
     private let exposureTrackHeight: CGFloat = 142
 
@@ -238,11 +239,13 @@ struct FocusExposureOverlay: View {
                         DragGesture(minimumDistance: 0)
                             .onChanged { value in
                                 guard isInteractive else { return }
+                                onInteractionChanged(true)
                                 updateExposure(from: value.location.y, shouldCommit: false)
                             }
                             .onEnded { value in
                                 guard isInteractive else { return }
                                 updateExposure(from: value.location.y, shouldCommit: true)
+                                onInteractionChanged(false)
                             }
                     )
             }

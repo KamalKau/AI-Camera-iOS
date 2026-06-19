@@ -40,7 +40,14 @@ struct WebRtcStreamProfile {
     let maxBitrate: Int
 
     func adjusted(for lensFacing: LensFacing) -> WebRtcStreamProfile {
-        self
+        guard lensFacing == .back, width <= 640, height <= 360 else { return self }
+        return WebRtcStreamProfile(
+            width: 854,
+            height: 480,
+            fps: fps,
+            minBitrate: minBitrate,
+            maxBitrate: maxBitrate
+        )
     }
 }
 
