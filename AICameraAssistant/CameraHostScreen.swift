@@ -234,8 +234,8 @@ struct CameraHostScreen: View {
             return "Portrait \(room.portraitEffect.replacingOccurrences(of: "_", with: " ").capitalized) \(room.portraitStrength)/7"
         }
         if room.sceneDetectionEnabled {
-            let label = room.sceneLabel.isEmpty ? "Scene detection ready" : room.sceneLabel
-            return room.sceneSuggestion.isEmpty ? label : "\(label): \(room.sceneSuggestion)"
+            let label = room.sceneDetection.label.isEmpty ? "Scene detection ready" : room.sceneDetection.label
+            return room.sceneDetection.suggestion.isEmpty ? label : "\(label): \(room.sceneDetection.suggestion)"
         }
         return nil
     }
@@ -318,6 +318,14 @@ struct CameraHostScreen: View {
                 services.webRtcSession.startHostVideoRecording { url, error in
                     Task { await camera.saveCapturedVideoFromStream(url, error: error) }
                 }
+                resetCaptureRequest()
+                isHandlingRemoteCapture = false
+            case "video_pause":
+                services.webRtcSession.pauseHostVideoRecording()
+                resetCaptureRequest()
+                isHandlingRemoteCapture = false
+            case "video_resume":
+                services.webRtcSession.resumeHostVideoRecording()
                 resetCaptureRequest()
                 isHandlingRemoteCapture = false
             case "video_stop":

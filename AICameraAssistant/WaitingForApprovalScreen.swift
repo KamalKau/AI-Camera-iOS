@@ -11,6 +11,7 @@ struct WaitingForApprovalScreen: View {
     @State private var flashMode = "off"
     @State private var cameraMode = "photo"
     @State private var isVideoRecording = false
+    @State private var isVideoPaused = false
     @State private var errorMessage: String?
     @State private var zoomPublishTask: Task<Void, Never>?
     @State private var focusReticlePoint: CGPoint?
@@ -244,67 +245,111 @@ struct WaitingForApprovalScreen: View {
     }
 
     private var controllerControls: some View {
-        VStack(spacing: 14) {
-            if showManualExposure {
-                manualExposurePanel
-            } else if showPortraitControls && cameraMode == "portrait" {
-                portraitControlsPanel
-            } else if showZoomBar {
-                zoomStrip
-            } else {
-                zoomPresetStrip
-            }
+        VStack(spacing: 12) {
+            controllerAccessoryPanel
+            controllerModeStrip
+            controllerPrimaryControls
+            controllerStatusOverlays
+        }
+        .frame(maxWidth: 430)
+    }
+
+    @ViewBuilder
+    private var controllerAccessoryPanel: some View {
+        if showManualExposure {
+            manualExposurePanel
+        } else if showPortraitControls && cameraMode == "portrait" {
+            portraitControlsPanel
+        } else if showZoomBar {
+            zoomStrip
+        } else {
+            zoomPresetStrip
+        }
+    }
+
+    private var controllerModeStrip: some View {
+        HStack(spacing: 6) {
+            modeButton("video", label: "VIDEO")
+            modeButton("photo", label: "PHOTO")
+            modeButton("portrait", label: "PORTRAIT")
+        }
+        .padding(4)
+        .background(Color.black.opacity(0.42), in: Capsule())
+        .overlay(Capsule().stroke(.white.opacity(0.16), lineWidth: 1))
+    }
+
+    private var controllerPrimaryControls: some View {
+        HStack(alignment: .center, spacing: 18) {
+            controllerLeftActions
+                .frame(width: 86)
+
+            Spacer(minLength: 0)
 
             if isVideoRecording {
                 recordingControls
             } else {
-                HStack(spacing: 34) {
-                    if cameraMode == "video" {
-                        videoHdrButton
-                    } else {
-                        portraitToggleButton
-                    }
-
+                VStack(spacing: 8) {
+                    captureModeBadge
                     shutterButton
-
-                    CameraCircleButton(
-                        systemName: lensFacing == .back ? "camera.rotate" : "camera.rotate.fill",
-                        size: 58
-                    ) {
-                        switchControllerLens()
-                    }
+                    burstCountPill
                 }
             }
 
-            HStack(spacing: 18) {
-                modeButton("video", label: "Video")
-                modeButton("photo", label: "Photo")
-                modeButton("portrait", label: "Portrait")
-            }
-            .font(.caption.weight(.medium))
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .background(Color.black.opacity(0.42), in: Capsule())
+            Spacer(minLength: 0)
 
-            if isVideoRecording {
-                recordingStatusPill
-            }
+            controllerRightActions
+                .frame(width: 86)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.black.opacity(0.34), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.14), lineWidth: 1))
+    }
 
-            if let captureFeedback {
-                Text(captureFeedback)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 7)
-                    .background(Color.black.opacity(0.48), in: Capsule())
+    private var controllerLeftActions: some View {
+        VStack(spacing: 12) {
+            if cameraMode == "video" {
+                videoHdrButton
+            } else {
+                portraitToggleButton
             }
+            boomerangButton
+        }
+    }
 
-            if let errorMessage {
-                Text(errorMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
-                    .multilineTextAlignment(.center)
+    private var controllerRightActions: some View {
+        VStack(spacing: 12) {
+            lensFlipButton(size: 58)
+            CameraCircleButton(systemName: "plus.magnifyingglass", size: 46, isSelected: showZoomBar) {
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    showManualExposure = false
+                    showPortraitControls = false
+                    showZoomBar.toggle()
+                }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var controllerStatusOverlays: some View {
+        if isVideoRecording {
+            recordingStatusPill
+        }
+
+        if let captureFeedback {
+            Text(captureFeedback)
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Color.black.opacity(0.48), in: Capsule())
+        }
+
+        if let errorMessage {
+            Text(errorMessage)
+                .font(.footnote)
+                .foregroundStyle(.red)
+                .multilineTextAlignment(.center)
         }
     }
 
@@ -436,17 +481,63 @@ struct WaitingForApprovalScreen: View {
     }
 
     private var recordingControls: some View {
-        HStack(spacing: 22) {
-            CameraCircleButton(systemName: "stop.fill", size: 64, role: .destructive) {
-                requestCapture()
+        VStack(spacing: 8) {
+            HStack(spacing: 16) {
+                CameraCircleButton(systemName: isVideoPaused ? "play.fill" : "pause.fill", size: 50) {
+                    requestVideoPauseResume()
+                }
+                CameraCircleButton(systemName: "stop.fill", size: 72, role: .destructive) {
+                    requestCapture()
+                }
+                lensFlipButton(size: 50)
             }
+            Text("VIDEO")
+                .font(.caption2.weight(.bold))
+                .foregroundStyle(.red)
+        }
+    }
 
-            CameraCircleButton(
-                systemName: lensFacing == .back ? "camera.rotate" : "camera.rotate.fill",
-                size: 54
-            ) {
-                switchControllerLens()
-            }
+    private var lensFlipButton: some View {
+        lensFlipButton(size: 58)
+    }
+
+    private func lensFlipButton(size: CGFloat) -> some View {
+        CameraCircleButton(
+            systemName: lensFacing == .back ? "camera.rotate" : "camera.rotate.fill",
+            size: size
+        ) {
+            switchControllerLens()
+        }
+    }
+
+    private var boomerangButton: some View {
+        CameraCircleButton(systemName: "infinity", size: 46) {
+            showTemporaryControlFeedback("Boomerang next")
+        }
+    }
+
+    private var captureModeBadge: some View {
+        Text(cameraModeDisplayLabel)
+            .font(.caption2.weight(.bold))
+            .foregroundStyle(cameraMode == "video" ? .red : .yellow)
+            .frame(height: 14)
+    }
+
+    private var burstCountPill: some View {
+        Text("1x")
+            .font(.caption2.monospacedDigit().weight(.semibold))
+            .foregroundStyle(.white.opacity(0.85))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(Color.black.opacity(0.36), in: Capsule())
+            .overlay(Capsule().stroke(.white.opacity(0.14), lineWidth: 1))
+    }
+
+    private var cameraModeDisplayLabel: String {
+        switch cameraMode {
+        case "video": return isVideoRecording ? "REC" : "VIDEO"
+        case "portrait": return "PORTRAIT"
+        default: return "PHOTO"
         }
     }
 
@@ -494,8 +585,11 @@ struct WaitingForApprovalScreen: View {
     private func modeButton(_ mode: String, label: String) -> some View {
         Button { updateCameraMode(mode) } label: {
             Text(label)
-                .fontWeight(cameraMode == mode ? .semibold : .medium)
-                .foregroundStyle(cameraMode == mode ? .yellow : .white.opacity(0.55))
+                .font(.caption2.weight(.bold))
+                .tracking(0)
+                .foregroundStyle(cameraMode == mode ? .black : .white.opacity(0.62))
+                .frame(minWidth: 78, minHeight: 30)
+                .background(cameraMode == mode ? Color.white : Color.clear, in: Capsule())
         }
         .buttonStyle(.plain)
     }
@@ -750,6 +844,35 @@ struct WaitingForApprovalScreen: View {
         }
     }
 
+    private func showTemporaryControlFeedback(_ message: String) {
+        captureFeedback = message
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(900))
+            if captureFeedback == message {
+                captureFeedback = nil
+            }
+        }
+    }
+
+    private func requestVideoPauseResume() {
+        guard isVideoRecording, !isCaptureRequesting, !isSwitchingCameraDuringRecording else { return }
+        let requestType = isVideoPaused ? "video_resume" : "video_pause"
+        isCaptureRequesting = true
+        captureFeedback = isVideoPaused ? "Resuming..." : "Pausing..."
+        Task {
+            do {
+                try await services.roomRepository.requestCapture(roomCode: roomCode, type: requestType)
+                isVideoPaused.toggle()
+                captureFeedback = isVideoPaused ? "Recording paused" : "Recording resumed"
+                isCaptureRequesting = false
+            } catch {
+                captureFeedback = nil
+                errorMessage = error.localizedDescription
+                isCaptureRequesting = false
+            }
+        }
+    }
+
     private func requestCapture() {
         let requestType = captureRequestType
         guard !isCaptureRequesting else { return }
@@ -775,9 +898,11 @@ struct WaitingForApprovalScreen: View {
                 try await services.roomRepository.requestCapture(roomCode: roomCode, type: requestType)
                 if requestType == "video_start" {
                     isVideoRecording = true
+                    isVideoPaused = false
                     captureFeedback = "Recording started"
                 } else if requestType == "video_stop" {
                     isVideoRecording = false
+                    isVideoPaused = false
                     captureFeedback = "Recording stopped"
                 } else {
                     Task { @MainActor in
@@ -810,6 +935,7 @@ struct WaitingForApprovalScreen: View {
         cameraMode = mode
         if mode != "video" {
             isVideoRecording = false
+            isVideoPaused = false
         }
         if mode != "portrait" {
             showPortraitControls = false

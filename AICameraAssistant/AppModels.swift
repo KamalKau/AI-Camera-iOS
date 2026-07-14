@@ -32,9 +32,12 @@ enum RoomSchema {
     nonisolated static let defaultCaptureRequestType = "photo"
     nonisolated static let defaultFlashMode = "off"
     nonisolated static let defaultSceneDetectionKey = "auto"
+    nonisolated static let defaultPortraitEffect = "blur"
+    nonisolated static let defaultPortraitStrength = 5
     nonisolated static let aspectRatioModes = ["full", "9_16", "3_4", "1_1"]
     nonisolated static let cameraModes = ["photo", "video", "portrait"]
     nonisolated static let flashModes = ["off", "auto", "on"]
+    nonisolated static let portraitEffects = ["blur", "studio", "mono", "backdrop", "low_key_mono", "high_key_mono", "color_point"]
     nonisolated static let captureRequestTypes = ["photo", "boomerang", "video_start", "video_stop", "video_pause", "video_resume"]
 
     nonisolated static func safeAspectRatioMode(_ mode: String) -> String {
@@ -51,6 +54,14 @@ enum RoomSchema {
 
     nonisolated static func safeCaptureRequestType(_ type: String) -> String {
         captureRequestTypes.contains(type) ? type : defaultCaptureRequestType
+    }
+
+    nonisolated static func safePortraitEffect(_ effect: String) -> String {
+        portraitEffects.contains(effect) ? effect : defaultPortraitEffect
+    }
+
+    nonisolated static func safePortraitStrength(_ strength: Int) -> Int {
+        min(7, max(1, strength))
     }
 
     nonisolated static func timestampId() -> Int64 {
@@ -335,7 +346,7 @@ protocol RoomRepository: RoomCreating, RoomConnectionManaging, RoomCameraControl
 
 extension RoomDocument {
     var captureRequestState: CaptureRequestState {
-        CaptureRequestState(isRequested: captureRequest != nil, id: captureRequestId, type: captureRequestType)
+        CaptureRequestState(isRequested: captureRequestId > 0, id: captureRequestId, type: captureRequestType)
     }
 
     var focusRequestState: FocusRequestState {
@@ -353,21 +364,6 @@ extension RoomDocument {
     var faceDetectionOverlayState: FaceDetectionOverlayState {
         FaceDetectionOverlayState(detected: faceDetected, count: faceCount, timestamp: faceDetectionTimestamp, primaryBox: faceBox, boxes: faceBoxes)
     }
-
-    var portraitSubjectX: Double { portraitFaceLeft }
-    var portraitSubjectY: Double { portraitFaceTop }
-    var portraitSubjectWidth: Double { max(0, portraitFaceRight - portraitFaceLeft) }
-    var portraitSubjectHeight: Double { max(0, portraitFaceBottom - portraitFaceTop) }
-    var faceBoxLeft: Double { faceBox.left }
-    var faceBoxTop: Double { faceBox.top }
-    var faceBoxRight: Double { faceBox.right }
-    var faceBoxBottom: Double { faceBox.bottom }
-    var sceneKey: String { sceneDetection.key }
-    var sceneLabel: String { sceneDetection.label }
-    var sceneSuggestion: String { sceneDetection.suggestion }
-    var sceneConfidence: Double { sceneDetection.confidence }
-    var sceneTimestamp: Int64 { sceneDetection.timestamp }
-    var sceneAutoAdjustment: String { sceneDetection.autoAdjustment }
 }
 
 extension RoomRepository {

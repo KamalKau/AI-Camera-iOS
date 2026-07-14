@@ -137,9 +137,9 @@ actor LocalRoomRepository: RoomRepository {
 
     func updatePortraitControls(roomCode: String, blurLevel: String, strength: Int, effect: String) async throws {
         try update(roomCode: roomCode) { room in
-            room.portraitBlurLevel = blurLevel
-            room.portraitStrength = min(7, max(1, strength))
-            room.portraitEffect = effect
+            room.portraitBlurLevel = Self.safePortraitEffect(blurLevel)
+            room.portraitStrength = Self.safePortraitStrength(strength)
+            room.portraitEffect = Self.safePortraitEffect(effect)
         }
     }
 
@@ -319,6 +319,14 @@ actor LocalRoomRepository: RoomRepository {
         RoomSchema.safeCaptureRequestType(type)
     }
 
+    private nonisolated static func safePortraitEffect(_ effect: String) -> String {
+        RoomSchema.safePortraitEffect(effect)
+    }
+
+    private nonisolated static func safePortraitStrength(_ strength: Int) -> Int {
+        RoomSchema.safePortraitStrength(strength)
+    }
+
     private nonisolated static func clampedUnit(_ value: Double) -> Double {
         min(1.0, max(0.0, value))
     }
@@ -486,9 +494,9 @@ actor FirestoreRoomRepository: RoomRepository {
 
     func updatePortraitControls(roomCode: String, blurLevel: String, strength: Int, effect: String) async throws {
         try await update(roomCode: roomCode, values: [
-            "portraitBlurLevel": blurLevel,
-            "portraitStrength": min(7, max(1, strength)),
-            "portraitEffect": effect
+            "portraitBlurLevel": Self.safePortraitEffect(blurLevel),
+            "portraitStrength": Self.safePortraitStrength(strength),
+            "portraitEffect": Self.safePortraitEffect(effect)
         ])
     }
 
@@ -703,6 +711,14 @@ actor FirestoreRoomRepository: RoomRepository {
         RoomSchema.safeCaptureRequestType(type)
     }
 
+    private nonisolated static func safePortraitEffect(_ effect: String) -> String {
+        RoomSchema.safePortraitEffect(effect)
+    }
+
+    private nonisolated static func safePortraitStrength(_ strength: Int) -> Int {
+        RoomSchema.safePortraitStrength(strength)
+    }
+
     private nonisolated static func clampedUnit(_ value: Double) -> Double {
         min(1.0, max(0.0, value))
     }
@@ -904,9 +920,9 @@ actor FirestoreRoomRepository: RoomRepository {
             sessionVersion: data["sessionVersion"]?.int64Value ?? 0,
             previewWidth: data["previewWidth"]?.integerNumberValue ?? 0,
             previewHeight: data["previewHeight"]?.integerNumberValue ?? 0,
-            portraitBlurLevel: data["portraitBlurLevel"]?.stringValue ?? "blur",
-            portraitStrength: min(7, max(1, data["portraitStrength"]?.integerNumberValue ?? 5)),
-            portraitEffect: data["portraitEffect"]?.stringValue ?? "blur",
+            portraitBlurLevel: Self.safePortraitEffect(data["portraitBlurLevel"]?.stringValue ?? RoomSchema.defaultPortraitEffect),
+            portraitStrength: Self.safePortraitStrength(data["portraitStrength"]?.integerNumberValue ?? RoomSchema.defaultPortraitStrength),
+            portraitEffect: Self.safePortraitEffect(data["portraitEffect"]?.stringValue ?? RoomSchema.defaultPortraitEffect),
             portraitStatus: data["portraitStatus"]?.stringValue ?? "finding",
             portraitFaceLeft: data["portraitFaceLeft"]?.numberValue ?? data["portraitSubjectX"]?.numberValue ?? 0,
             portraitFaceTop: data["portraitFaceTop"]?.numberValue ?? data["portraitSubjectY"]?.numberValue ?? 0,
@@ -1274,9 +1290,9 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
 
     func updatePortraitControls(roomCode: String, blurLevel: String, strength: Int, effect: String) async throws {
         try await update(roomCode: roomCode, values: [
-            "portraitBlurLevel": blurLevel,
-            "portraitStrength": min(7, max(1, strength)),
-            "portraitEffect": effect
+            "portraitBlurLevel": Self.safePortraitEffect(blurLevel),
+            "portraitStrength": Self.safePortraitStrength(strength),
+            "portraitEffect": Self.safePortraitEffect(effect)
         ])
     }
 
@@ -1535,9 +1551,9 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
             captureRequestId: captureRequest?.id ?? 0,
             captureRequestType: captureRequest?.type ?? "photo",
             lensFacing: LensFacing(rawValue: data["lensFacing"] as? String ?? "back") ?? .back,
-            zoomLevel: data["zoomLevel"] as? Double ?? 1.0,
-            minZoom: data["minZoom"] as? Double ?? 1.0,
-            maxZoom: data["maxZoom"] as? Double ?? 8.0,
+            zoomLevel: Self.doubleValue(data["zoomLevel"], default: 1.0),
+            minZoom: Self.doubleValue(data["minZoom"], default: 1.0),
+            maxZoom: Self.doubleValue(data["maxZoom"], default: 8.0),
             flashEnabled: data["flashEnabled"] as? Bool ?? (flashMode == "on"),
             flashMode: flashMode,
             flashSupported: data["flashSupported"] as? Bool ?? true,
@@ -1549,33 +1565,39 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
             videoHdrEnabled: data["videoHdrEnabled"] as? Bool ?? false,
             toolbarExpanded: data["toolbarExpanded"] as? Bool ?? false,
             focusRequestId: Self.int64Value(data["focusRequestId"]),
-            focusPointX: data["focusPointX"] as? Double ?? 0.5,
-            focusPointY: data["focusPointY"] as? Double ?? 0.5,
+            focusPointX: Self.doubleValue(data["focusPointX"], default: 0.5),
+            focusPointY: Self.doubleValue(data["focusPointY"], default: 0.5),
             focusLockEnabled: data["focusLockEnabled"] as? Bool ?? false,
-            exposureMinIndex: data["exposureMinIndex"] as? Int ?? 0,
-            exposureMaxIndex: data["exposureMaxIndex"] as? Int ?? 0,
-            exposureIndex: data["exposureIndex"] as? Int ?? 0,
+            exposureMinIndex: Self.intValue(data["exposureMinIndex"]),
+            exposureMaxIndex: Self.intValue(data["exposureMaxIndex"]),
+            exposureIndex: Self.intValue(data["exposureIndex"]),
             streamQualityMode: StreamQualityMode(rawValue: data["streamQualityMode"] as? String ?? "") ?? .lowLatency,
             rtcSessionId: data["rtcSessionId"] as? String,
             sessionVersion: Self.int64Value(data["sessionVersion"]),
-            previewWidth: data["previewWidth"] as? Int ?? 0,
-            previewHeight: data["previewHeight"] as? Int ?? 0,
-            portraitBlurLevel: data["portraitBlurLevel"] as? String ?? "blur",
-            portraitStrength: min(7, max(1, data["portraitStrength"] as? Int ?? 5)),
-            portraitEffect: data["portraitEffect"] as? String ?? "blur",
+            previewWidth: Self.intValue(data["previewWidth"]),
+            previewHeight: Self.intValue(data["previewHeight"]),
+            portraitBlurLevel: Self.safePortraitEffect(data["portraitBlurLevel"] as? String ?? RoomSchema.defaultPortraitEffect),
+            portraitStrength: Self.safePortraitStrength(Self.intValue(data["portraitStrength"], default: RoomSchema.defaultPortraitStrength)),
+            portraitEffect: Self.safePortraitEffect(data["portraitEffect"] as? String ?? RoomSchema.defaultPortraitEffect),
             portraitStatus: data["portraitStatus"] as? String ?? "finding",
-            portraitFaceLeft: data["portraitFaceLeft"] as? Double ?? data["portraitSubjectX"] as? Double ?? 0,
-            portraitFaceTop: data["portraitFaceTop"] as? Double ?? data["portraitSubjectY"] as? Double ?? 0,
-            portraitFaceRight: data["portraitFaceRight"] as? Double ?? ((data["portraitSubjectX"] as? Double ?? 0) + (data["portraitSubjectWidth"] as? Double ?? 0)),
-            portraitFaceBottom: data["portraitFaceBottom"] as? Double ?? ((data["portraitSubjectY"] as? Double ?? 0) + (data["portraitSubjectHeight"] as? Double ?? 0)),
+            portraitFaceLeft: Self.doubleValue(data["portraitFaceLeft"], fallback: data["portraitSubjectX"]),
+            portraitFaceTop: Self.doubleValue(data["portraitFaceTop"], fallback: data["portraitSubjectY"]),
+            portraitFaceRight: Self.doubleValue(
+                data["portraitFaceRight"],
+                default: Self.doubleValue(data["portraitSubjectX"]) + Self.doubleValue(data["portraitSubjectWidth"])
+            ),
+            portraitFaceBottom: Self.doubleValue(
+                data["portraitFaceBottom"],
+                default: Self.doubleValue(data["portraitSubjectY"]) + Self.doubleValue(data["portraitSubjectHeight"])
+            ),
             faceDetected: data["faceDetected"] as? Bool ?? false,
-            faceCount: data["faceCount"] as? Int ?? 0,
+            faceCount: Self.intValue(data["faceCount"]),
             faceDetectionTimestamp: Self.int64Value(data["faceDetectionTimestamp"]),
             faceBox: decodeFaceBounds(data["faceBox"]) ?? NormalizedFaceBounds(
-                left: data["faceBoxLeft"] as? Double ?? 0,
-                top: data["faceBoxTop"] as? Double ?? 0,
-                right: data["faceBoxRight"] as? Double ?? 0,
-                bottom: data["faceBoxBottom"] as? Double ?? 0
+                left: Self.doubleValue(data["faceBoxLeft"]),
+                top: Self.doubleValue(data["faceBoxTop"]),
+                right: Self.doubleValue(data["faceBoxRight"]),
+                bottom: Self.doubleValue(data["faceBoxBottom"])
             ),
             faceBoxes: decodeFaceBoundsArray(data["faceBoxes"]),
             sceneDetectionEnabled: data["sceneDetectionEnabled"] as? Bool ?? false,
@@ -1583,7 +1605,7 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
                 key: data["sceneDetectionKey"] as? String ?? data["sceneKey"] as? String ?? "auto",
                 label: data["sceneDetectionLabel"] as? String ?? data["sceneLabel"] as? String ?? "",
                 suggestion: data["sceneDetectionSuggestion"] as? String ?? data["sceneSuggestion"] as? String ?? "",
-                confidence: data["sceneDetectionConfidence"] as? Double ?? data["sceneConfidence"] as? Double ?? 0,
+                confidence: Self.doubleValue(data["sceneDetectionConfidence"], fallback: data["sceneConfidence"]),
                 timestamp: Self.int64Value(data["sceneDetectionTimestamp"]) != 0 ? Self.int64Value(data["sceneDetectionTimestamp"]) : Self.int64Value(data["sceneTimestamp"]),
                 autoAdjustment: data["sceneDetectionAutoAdjustment"] as? String ?? data["sceneAutoAdjustment"] as? String ?? ""
             ),
@@ -1598,7 +1620,7 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
     private static func decodeCandidate(_ data: [String: Any]) -> IceCandidatePayload? {
         guard let candidate = data["candidate"] as? String,
               let sdpMid = data["sdpMid"] as? String else { return nil }
-        let index = data["sdpMLineIndex"] as? Int ?? 0
+        let index = intValue(data["sdpMLineIndex"])
         return IceCandidatePayload(candidate: candidate, sdpMid: sdpMid, sdpMLineIndex: Int32(index))
     }
 
@@ -1614,16 +1636,34 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
     private static func decodeFaceBounds(_ value: Any?) -> NormalizedFaceBounds? {
         guard let fields = value as? [String: Any] else { return nil }
         return NormalizedFaceBounds(
-            left: fields["left"] as? Double ?? 0,
-            top: fields["top"] as? Double ?? 0,
-            right: fields["right"] as? Double ?? 0,
-            bottom: fields["bottom"] as? Double ?? 0
+            left: doubleValue(fields["left"]),
+            top: doubleValue(fields["top"]),
+            right: doubleValue(fields["right"]),
+            bottom: doubleValue(fields["bottom"])
         )
     }
 
     private static func decodeFaceBoundsArray(_ value: Any?) -> [NormalizedFaceBounds] {
         guard let values = value as? [[String: Any]] else { return [] }
         return values.compactMap(decodeFaceBounds)
+    }
+
+    private static func doubleValue(_ value: Any?, fallback: Any? = nil, default defaultValue: Double = 0) -> Double {
+        if let value = value as? Double { return value }
+        if let value = value as? Int { return Double(value) }
+        if let value = value as? Int64 { return Double(value) }
+        if let value = value as? NSNumber { return value.doubleValue }
+        if let value = value as? String, let parsed = Double(value) { return parsed }
+        if let fallback { return doubleValue(fallback, default: defaultValue) }
+        return defaultValue
+    }
+
+    private static func intValue(_ value: Any?, default defaultValue: Int = 0) -> Int {
+        if let value = value as? Int { return value }
+        if let value = value as? Int64 { return Int(value) }
+        if let value = value as? NSNumber { return value.intValue }
+        if let value = value as? String, let parsed = Int(value) { return parsed }
+        return defaultValue
     }
 
     private static func int64Value(_ value: Any?) -> Int64 {
@@ -1670,6 +1710,14 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
 
     private static func safeCaptureRequestType(_ type: String) -> String {
         RoomSchema.safeCaptureRequestType(type)
+    }
+
+    private static func safePortraitEffect(_ effect: String) -> String {
+        RoomSchema.safePortraitEffect(effect)
+    }
+
+    private static func safePortraitStrength(_ strength: Int) -> Int {
+        RoomSchema.safePortraitStrength(strength)
     }
 
     private static func clampedUnit(_ value: Double) -> Double {

@@ -1,5 +1,6 @@
 @preconcurrency import AVFoundation
 import Combine
+import CoreImage
 import Foundation
 import UIKit
 #if canImport(WebRTC)
@@ -23,6 +24,65 @@ enum WebRtcConnectionState: String {
     case failed
 }
 
+#if canImport(WebRTC)
+final class LocalFrameSnapshotRenderer: NSObject, RTCVideoRenderer {
+    private let lock = NSLock()
+    private let ciContext = CIContext(options: [.cacheIntermediates: false])
+    private var latestPixelBuffer: CVPixelBuffer?
+    private var latestRotationDegrees = 0
+
+    func setSize(_ size: CGSize) {}
+
+    func renderFrame(_ frame: RTCVideoFrame?) {
+        guard let frame,
+              let cvBuffer = frame.buffer as? RTCCVPixelBuffer else { return }
+        lock.lock()
+        latestPixelBuffer = cvBuffer.pixelBuffer
+        latestRotationDegrees = Int(frame.rotation.rawValue)
+        lock.unlock()
+    }
+
+    func snapshotImage(isMirrored: Bool, appliesFrameRotation: Bool, correctsFrontLandscapeUpsideDown: Bool) -> UIImage? {
+        lock.lock()
+        let pixelBuffer = latestPixelBuffer
+        let rotationDegrees = latestRotationDegrees
+        lock.unlock()
+        guard let pixelBuffer else { return nil }
+
+        var image = CIImage(cvPixelBuffer: pixelBuffer)
+        if appliesFrameRotation {
+            image = image.oriented(cgImageOrientation(forWebRtcRotationDegrees: rotationDegrees))
+        } else if correctsFrontLandscapeUpsideDown {
+            image = image.oriented(.down)
+        }
+        image = normalizedToZeroOrigin(image)
+        if isMirrored {
+            image = image.transformed(by: CGAffineTransform(scaleX: -1, y: 1).translatedBy(x: -image.extent.width, y: 0))
+            image = normalizedToZeroOrigin(image)
+        }
+        guard let cgImage = ciContext.createCGImage(image, from: image.extent) else { return nil }
+        return UIImage(cgImage: cgImage, scale: UIScreen.main.scale, orientation: .up)
+    }
+
+    private func cgImageOrientation(forWebRtcRotationDegrees degrees: Int) -> CGImagePropertyOrientation {
+        switch degrees {
+        case 90:
+            return .right
+        case 180:
+            return .down
+        case 270:
+            return .left
+        default:
+            return .up
+        }
+    }
+
+    private func normalizedToZeroOrigin(_ image: CIImage) -> CIImage {
+        image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
+    }
+}
+#endif
+
 @MainActor
 final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManaging {
     @Published private(set) var state: WebRtcConnectionState = .idle
@@ -39,6 +99,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     private var peerConnection: RTCPeerConnection?
     private var cameraCapturer: RTCCameraVideoCapturer?
     private var localVideoSource: RTCVideoSource?
+    private var localFrameSnapshotRenderer: LocalFrameSnapshotRenderer?
     private var videoSender: RTCRtpSender?
     private var role: WebRtcRole = .host
     private var roomCode: String?
@@ -58,6 +119,8 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     private let hostPhotoOutput = AVCapturePhotoOutput()
     private let hostMovieOutput = AVCaptureMovieFileOutput()
     private var hostAudioInput: AVCaptureDeviceInput?
+    private var hostAudioRecorder: AVAudioRecorder?
+    private var hostStandaloneAudioSegments: [URL] = []
     private var pendingHostPhotoDelegates: [Int64: PhotoCaptureDelegate] = [:]
     private var hostMovieDelegate: MovieCaptureDelegate?
     private var hostRecordingSegments: [URL] = []
@@ -65,9 +128,11 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     private var pendingRecordingLensFacing: LensFacing?
     private var shouldFinalizeHostRecording = false
     @Published private(set) var isHostVideoRecording = false
+    @Published private(set) var isHostVideoPaused = false
     private var isPreparingHostVideoRecording = false
     private var activeExposureIndex = 0
     private var isRestartingCapture = false
+    private var isThrottlingLocalStreamForRecording = false
     #endif
 
     override init() {
@@ -164,17 +229,23 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         removeHostMovieOutput()
         cameraCapturer?.stopCapture()
         cameraCapturer = nil
+        localFrameSnapshotRenderer = nil
         localVideoSource = nil
         videoSender = nil
         activeCaptureDevice = nil
         hostMovieDelegate = nil
         hostRecordingSegments.removeAll()
+        hostStandaloneAudioSegments.removeAll()
+        hostAudioRecorder?.stop()
+        hostAudioRecorder = nil
         hostRecordingCompletion = nil
         pendingRecordingLensFacing = nil
         shouldFinalizeHostRecording = false
         hostAudioInput = nil
         isPreparingHostVideoRecording = false
         isHostVideoRecording = false
+        isHostVideoPaused = false
+        isThrottlingLocalStreamForRecording = false
         pendingHostPhotoDelegates.removeAll()
         activeExposureIndex = 0
         capturedLensFacing = .back
@@ -279,41 +350,24 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     func captureHostPhoto(wantsPortraitMatte: Bool = false, completion: @escaping (UIImage?, Data?, UIDeviceOrientation, LensFacing, Bool, CIImage?) -> Void) {
         #if canImport(WebRTC)
         let capturedDeviceOrientation = currentDeviceCaptureOrientation()
-        guard role == .host,
-              let cameraCapturer,
-              let activeCaptureDevice,
-              !isRestartingCapture else {
-            completion(nil, nil, capturedDeviceOrientation, activeLensFacing, capturedDeviceOrientation.isLandscape, nil)
+        let capturedLensFacing = activeCaptureDevice.map { $0.position == .front ? LensFacing.front : .back } ?? activeLensFacing
+        guard role == .host, !isRestartingCapture else {
+            completion(nil, nil, capturedDeviceOrientation, capturedLensFacing, capturedDeviceOrientation.isLandscape, nil)
             return
         }
 
-        let capturedLensFacing: LensFacing = activeCaptureDevice.position == .front ? .front : .back
-        let photoOutput = hostPhotoOutput
-        let settings = AVCapturePhotoSettings()
-        settings.photoQualityPrioritization = .speed
-        if let flashMode = activeFlashMode.safeCameraFlashMode.avCaptureFlashMode(supportedModes: photoOutput.supportedFlashModes, lensFacing: capturedLensFacing) {
-            settings.flashMode = flashMode
+        let isLandscapeCapture = capturedDeviceOrientation.isLandscape
+        let shouldCorrectFrontLandscape = capturedLensFacing == .front && isLandscapeCapture
+        guard let image = localFrameSnapshotRenderer?.snapshotImage(
+            isMirrored: capturedLensFacing == .front,
+            appliesFrameRotation: !isLandscapeCapture,
+            correctsFrontLandscapeUpsideDown: shouldCorrectFrontLandscape
+        ) else {
+            completion(nil, nil, capturedDeviceOrientation, capturedLensFacing, capturedDeviceOrientation.isLandscape, nil)
+            return
         }
-        Self.configurePortraitPhotoSettings(settings, output: photoOutput, enabled: wantsPortraitMatte)
-
-        let uniqueID = Int64(settings.uniqueID)
-        let delegate = PhotoCaptureDelegate { [weak self] image, data, diagnostics in
-            Task { @MainActor in
-                guard let self else { return }
-                self.pendingHostPhotoDelegates[uniqueID] = nil
-                let useLandscapeCanvas = shouldUseLandscapeCanvas(photoOutput: photoOutput, capturedDeviceOrientation: capturedDeviceOrientation)
-                    || diagnostics.storedLandscape
-                completion(image, data, capturedDeviceOrientation, capturedLensFacing, useLandscapeCanvas, diagnostics.portraitMask)
-            }
-        }
-        pendingHostPhotoDelegates[uniqueID] = delegate
-
-        hostCaptureQueue.async {
-            Self.configureHostPhotoOutput(photoOutput, on: cameraCapturer) {
-                configurePhotoConnection(photoOutput, lensFacing: capturedLensFacing)
-                photoOutput.capturePhoto(with: settings, delegate: delegate)
-            }
-        }
+        let data = image.jpegData(compressionQuality: 0.94)
+        completion(image, data, capturedDeviceOrientation, capturedLensFacing, capturedDeviceOrientation.isLandscape, nil)
         #else
         let capturedDeviceOrientation = currentDeviceCaptureOrientation()
         completion(nil, nil, capturedDeviceOrientation, activeLensFacing, false, nil)
@@ -324,10 +378,33 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         #if canImport(WebRTC)
         guard role == .host, !isHostVideoRecording, !isPreparingHostVideoRecording else { return }
         hostRecordingSegments.removeAll()
+        hostStandaloneAudioSegments.removeAll()
+        hostAudioRecorder?.stop()
+        hostAudioRecorder = nil
         hostRecordingCompletion = completion
         pendingRecordingLensFacing = nil
         shouldFinalizeHostRecording = false
         isHostVideoRecording = true
+        isHostVideoPaused = false
+        setLocalStreamThrottledForRecording(true)
+        startHostRecordingSegment()
+        #endif
+    }
+
+    func pauseHostVideoRecording() {
+        #if canImport(WebRTC)
+        guard isHostVideoRecording, !isHostVideoPaused, hostMovieOutput.isRecording else { return }
+        isHostVideoPaused = true
+        isPreparingHostVideoRecording = false
+        stopStandaloneAudioRecordingSegment()
+        hostMovieOutput.stopRecording()
+        #endif
+    }
+
+    func resumeHostVideoRecording() {
+        #if canImport(WebRTC)
+        guard isHostVideoRecording, isHostVideoPaused, !hostMovieOutput.isRecording else { return }
+        isHostVideoPaused = false
         startHostRecordingSegment()
         #endif
     }
@@ -337,6 +414,8 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         isPreparingHostVideoRecording = false
         pendingRecordingLensFacing = nil
         shouldFinalizeHostRecording = true
+        isHostVideoPaused = false
+        stopStandaloneAudioRecordingSegment()
         guard hostMovieOutput.isRecording else {
             finalizeHostRecording(error: nil)
             return
@@ -398,6 +477,9 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         localVideoSource = videoSource
         adaptLocalVideoSource()
         let videoTrack = factory.videoTrack(with: videoSource, trackId: "camera-video")
+        let snapshotRenderer = LocalFrameSnapshotRenderer()
+        videoTrack.add(snapshotRenderer)
+        localFrameSnapshotRenderer = snapshotRenderer
         if let sender = peerConnection.add(videoTrack, streamIds: ["camera-stream"]) {
             videoSender = sender
             configureVideoSender(sender)
@@ -405,6 +487,8 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
 
         cameraCapturer = capturer
         localVideoTrack = videoTrack
+        Self.configureHostPhotoOutput(hostPhotoOutput, on: capturer)
+        Self.configureHostMovieVideoOutput(hostMovieOutput, on: capturer)
         try startCapture(capturer, lensFacing: activeLensFacing)
     }
 
@@ -476,6 +560,17 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         session.addOutput(photoOutput)
         session.commitConfiguration()
         Self.preparePhotoOutput(photoOutput, completion: completion)
+    }
+
+    private nonisolated static func configureHostMovieVideoOutput(
+        _ movieOutput: AVCaptureMovieFileOutput,
+        on capturer: RTCCameraVideoCapturer
+    ) {
+        let session = capturer.captureSession
+        guard !session.outputs.contains(movieOutput), session.canAddOutput(movieOutput) else { return }
+        session.beginConfiguration()
+        session.addOutput(movieOutput)
+        session.commitConfiguration()
     }
 
     private func switchRecordingLens(to lensFacing: LensFacing) {
@@ -584,16 +679,20 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         }
     }
 
+    private func activateHostAudioSession() throws {
+        try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .videoRecording, options: [.allowBluetoothHFP, .defaultToSpeaker])
+        try AVAudioSession.sharedInstance().setActive(true)
+    }
+
     private func configureHostMovieOutput(on capturer: RTCCameraVideoCapturer, activateAudioSession: Bool = true) async throws {
         let session = capturer.captureSession
         if activateAudioSession {
-            try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .videoRecording, options: [.allowBluetoothHFP, .defaultToSpeaker])
-            try AVAudioSession.sharedInstance().setActive(true)
+            try activateHostAudioSession()
         }
         let movieOutput = hostMovieOutput
         let existingAudioInput = hostAudioInput
         let newAudioInput: AVCaptureDeviceInput?
-        if existingAudioInput == nil {
+        if activateAudioSession, existingAudioInput == nil {
             guard let microphone = AVCaptureDevice.default(for: .audio) else {
                 throw AVError(.deviceNotConnected)
             }
@@ -664,20 +763,13 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         isPreparingHostVideoRecording = true
         Task { @MainActor in
             do {
-                guard Bundle.main.object(forInfoDictionaryKey: "NSMicrophoneUsageDescription") != nil else {
-                    throw WebRtcSessionError.microphoneUsageDescriptionMissing
-                }
-                guard await ensureMicrophoneAccess() else {
-                    throw WebRtcSessionError.microphonePermissionDenied
-                }
                 let cameraCapturer = try await readyCameraCapturerForRecording()
-                guard isHostVideoRecording, isPreparingHostVideoRecording else { return }
-                try await configureHostMovieOutput(on: cameraCapturer)
+                guard isHostVideoRecording, !isHostVideoPaused, isPreparingHostVideoRecording else { return }
+                if hostMovieOutput.connection(with: .video) == nil {
+                    try await configureHostMovieOutput(on: cameraCapturer, activateAudioSession: false)
+                }
                 guard hostMovieOutput.connection(with: .video) != nil else {
                     throw WebRtcSessionError.cameraUnavailable
-                }
-                guard hostMovieOutput.connection(with: .audio) != nil else {
-                    throw AVError(.deviceNotConnected)
                 }
                 let url = FileManager.default.temporaryDirectory
                     .appendingPathComponent("AI-Camera-\(UUID().uuidString)")
@@ -691,14 +783,58 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
                 isPreparingHostVideoRecording = false
                 let movieOutput = hostMovieOutput
                 let recordingLensFacing = activeLensFacing
-                hostCaptureQueue.async {
+                hostCaptureQueue.async { [weak self] in
                     configureMovieConnection(movieOutput, lensFacing: recordingLensFacing)
                     movieOutput.startRecording(to: url, recordingDelegate: delegate)
+                    Task { @MainActor in
+                        self?.startStandaloneAudioRecordingSegment()
+                    }
                 }
             } catch {
                 isPreparingHostVideoRecording = false
                 finalizeHostRecording(error: error)
             }
+        }
+    }
+
+    private func startStandaloneAudioRecordingSegment() {
+        guard hostAudioRecorder == nil else { return }
+        Task { @MainActor in
+            guard Bundle.main.object(forInfoDictionaryKey: "NSMicrophoneUsageDescription") != nil,
+                  await ensureMicrophoneAccess(),
+                  isHostVideoRecording,
+                  !isHostVideoPaused else { return }
+            do {
+                try AVAudioSession.sharedInstance().setCategory(.playAndRecord, mode: .videoRecording, options: [.allowBluetoothHFP, .defaultToSpeaker])
+                try AVAudioSession.sharedInstance().setActive(true)
+                let url = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("AI-Camera-Audio-\(UUID().uuidString)")
+                    .appendingPathExtension("m4a")
+                let settings: [String: Any] = [
+                    AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+                    AVSampleRateKey: 44_100,
+                    AVNumberOfChannelsKey: 1,
+                    AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
+                ]
+                let recorder = try AVAudioRecorder(url: url, settings: settings)
+                recorder.prepareToRecord()
+                recorder.record()
+                hostAudioRecorder = recorder
+            } catch {
+                hostAudioRecorder = nil
+            }
+        }
+    }
+
+    private func stopStandaloneAudioRecordingSegment() {
+        guard let recorder = hostAudioRecorder else { return }
+        let url = recorder.url
+        recorder.stop()
+        hostAudioRecorder = nil
+        if isUsableRecordingSegment(url) {
+            hostStandaloneAudioSegments.append(url)
+        } else {
+            try? FileManager.default.removeItem(at: url)
         }
     }
 
@@ -724,31 +860,44 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     }
 
     private func finalizeHostRecording(error: Error?) {
+        stopStandaloneAudioRecordingSegment()
         let completion = hostRecordingCompletion
         let segments = hostRecordingSegments
+        let audioSegments = hostStandaloneAudioSegments
         hostRecordingCompletion = nil
         hostRecordingSegments.removeAll()
+        hostStandaloneAudioSegments.removeAll()
         pendingRecordingLensFacing = nil
         shouldFinalizeHostRecording = false
         isPreparingHostVideoRecording = false
         isHostVideoRecording = false
+        isHostVideoPaused = false
+        setLocalStreamThrottledForRecording(false)
 
         if let error {
             completion?(nil, error)
             return
         }
         guard let completion else { return }
-        if segments.count <= 1 {
-            completion(segments.first, nil)
-            return
-        }
         Task {
             do {
-                let mergedURL = try await mergeRecordingSegments(segments)
-                await MainActor.run { completion(mergedURL, nil) }
+                let videoURL: URL?
+                if segments.count <= 1 {
+                    videoURL = segments.first
+                } else {
+                    videoURL = try await mergeRecordingSegments(segments)
+                }
+                guard let videoURL else {
+                    await MainActor.run { completion(nil, nil) }
+                    return
+                }
+                let finalURL = audioSegments.isEmpty
+                    ? videoURL
+                    : try await mergeStandaloneAudioSegments(audioSegments, into: videoURL)
+                await MainActor.run { completion(finalURL, nil) }
             } catch {
                 await MainActor.run {
-                    segments.forEach { completion($0, nil) }
+                    completion(segments.first, nil)
                 }
             }
         }
@@ -818,13 +967,18 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
             let positiveSpaceTransform = info.preferredTransform.concatenating(
                 CGAffineTransform(translationX: -info.orientedRect.minX, y: -info.orientedRect.minY)
             )
-            let centeredTransform = positiveSpaceTransform.concatenating(
-                CGAffineTransform(
-                    translationX: (renderSize.width - abs(info.orientedRect.width)) / 2.0,
-                    y: (renderSize.height - abs(info.orientedRect.height)) / 2.0
+            let orientedSize = CGSize(width: abs(info.orientedRect.width), height: abs(info.orientedRect.height))
+            let fillScale = max(renderSize.width / orientedSize.width, renderSize.height / orientedSize.height)
+            let scaledSize = CGSize(width: orientedSize.width * fillScale, height: orientedSize.height * fillScale)
+            let fillTransform = positiveSpaceTransform
+                .concatenating(CGAffineTransform(scaleX: fillScale, y: fillScale))
+                .concatenating(
+                    CGAffineTransform(
+                        translationX: (renderSize.width - scaledSize.width) / 2.0,
+                        y: (renderSize.height - scaledSize.height) / 2.0
+                    )
                 )
-            )
-            layerInstruction.setTransform(centeredTransform, at: cursor)
+            layerInstruction.setTransform(fillTransform, at: cursor)
             instruction.layerInstructions = [layerInstruction]
             instructions.append(instruction)
             cursor = cursor + info.duration
@@ -861,6 +1015,71 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         return outputURL
     }
 
+    private func mergeStandaloneAudioSegments(_ audioSegments: [URL], into videoURL: URL) async throws -> URL {
+        let videoAsset = AVURLAsset(url: videoURL)
+        guard let sourceVideoTrack = try await videoAsset.loadTracks(withMediaType: .video).first else {
+            throw WebRtcSessionError.cameraUnavailable
+        }
+        let videoDuration = try await videoAsset.load(.duration)
+        let videoTimeRange = CMTimeRange(start: .zero, duration: videoDuration)
+        let preferredTransform = try await sourceVideoTrack.load(.preferredTransform)
+
+        let composition = AVMutableComposition()
+        guard let compositionVideoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw WebRtcSessionError.cameraUnavailable
+        }
+        try compositionVideoTrack.insertTimeRange(videoTimeRange, of: sourceVideoTrack, at: .zero)
+        compositionVideoTrack.preferredTransform = preferredTransform
+
+        if let sourceVideoAudioTrack = try await videoAsset.loadTracks(withMediaType: .audio).first,
+           let compositionSourceAudioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            try compositionSourceAudioTrack.insertTimeRange(videoTimeRange, of: sourceVideoAudioTrack, at: .zero)
+        }
+
+        if let compositionAudioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            var cursor = CMTime.zero
+            for audioURL in audioSegments {
+                let audioAsset = AVURLAsset(url: audioURL)
+                let audioDuration = try await audioAsset.load(.duration)
+                guard audioDuration.isValid, audioDuration.seconds > 0,
+                      let sourceAudioTrack = try await audioAsset.loadTracks(withMediaType: .audio).first else { continue }
+                let remainingDuration = videoDuration - cursor
+                guard remainingDuration.seconds > 0 else { break }
+                let insertDuration = min(audioDuration, remainingDuration)
+                try compositionAudioTrack.insertTimeRange(
+                    CMTimeRange(start: .zero, duration: insertDuration),
+                    of: sourceAudioTrack,
+                    at: cursor
+                )
+                cursor = cursor + insertDuration
+            }
+        }
+
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AI-Camera-With-Audio-\(UUID().uuidString)")
+            .appendingPathExtension("mov")
+        guard let exportSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetMediumQuality) else {
+            throw WebRtcSessionError.cameraUnavailable
+        }
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .mov
+        exportSession.shouldOptimizeForNetworkUse = true
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            exportSession.exportAsynchronously {
+                if let error = exportSession.error {
+                    continuation.resume(throwing: error)
+                } else if exportSession.status == .completed {
+                    continuation.resume()
+                } else {
+                    continuation.resume(throwing: WebRtcSessionError.cameraUnavailable)
+                }
+            }
+        }
+        audioSegments.forEach { try? FileManager.default.removeItem(at: $0) }
+        try? FileManager.default.removeItem(at: videoURL)
+        return outputURL
+    }
+
     private func readyCameraCapturerForRecording() async throws -> RTCCameraVideoCapturer {
         for _ in 0..<18 {
             if let cameraCapturer,
@@ -889,29 +1108,12 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         }
         applyDeviceControls(zoomLevel: activeZoomLevel)
         applyExposureOnDevice(device, exposureIndex: activeExposureIndex)
-        prewarmHostCaptureOutputsIfPossible()
     }
 
     private func publishPreviewSize(_ profile: WebRtcStreamProfile) {
         guard let roomCode, let repository = repository as? any RoomCameraControlUpdating else { return }
         Task {
             try? await repository.updatePreviewSize(roomCode: roomCode, width: profile.width, height: profile.height)
-        }
-    }
-
-    private func prewarmHostCaptureOutputsIfPossible() {
-        guard role == .host, let cameraCapturer else { return }
-        let photoOutput = hostPhotoOutput
-        hostCaptureQueue.async {
-            Self.configureHostPhotoOutput(photoOutput, on: cameraCapturer)
-        }
-
-        guard !isHostVideoRecording,
-              !isPreparingHostVideoRecording,
-              Bundle.main.object(forInfoDictionaryKey: "NSMicrophoneUsageDescription") != nil,
-              AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { return }
-        Task { @MainActor in
-            try? await self.configureHostMovieOutput(on: cameraCapturer, activateAudioSession: false)
         }
     }
 
@@ -1006,7 +1208,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
 
     private func configureVideoSender(_ sender: RTCRtpSender) {
         let parameters = sender.parameters
-        let profile = streamQualityMode.webRtcProfile.adjusted(for: activeLensFacing)
+        let profile = activeWebRtcStreamProfile()
         parameters.encodings.forEach { encoding in
             encoding.minBitrateBps = NSNumber(value: profile.minBitrate)
             encoding.maxBitrateBps = NSNumber(value: profile.maxBitrate)
@@ -1017,8 +1219,28 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
 
     private func adaptLocalVideoSource() {
         guard let localVideoSource else { return }
-        let profile = streamQualityMode.webRtcProfile.adjusted(for: activeLensFacing)
+        let profile = activeWebRtcStreamProfile()
         localVideoSource.adaptOutputFormat(toWidth: Int32(profile.width), height: Int32(profile.height), fps: Int32(profile.fps))
+    }
+
+    private func activeWebRtcStreamProfile() -> WebRtcStreamProfile {
+        let profile = streamQualityMode.webRtcProfile.adjusted(for: activeLensFacing)
+        guard isThrottlingLocalStreamForRecording else { return profile }
+        return WebRtcStreamProfile(
+            width: min(profile.width, 640),
+            height: min(profile.height, 360),
+            fps: min(profile.fps, 15),
+            minBitrate: min(profile.minBitrate, 450_000),
+            maxBitrate: min(profile.maxBitrate, 1_200_000)
+        )
+    }
+
+    private func setLocalStreamThrottledForRecording(_ isThrottled: Bool) {
+        guard isThrottlingLocalStreamForRecording != isThrottled else { return }
+        isThrottlingLocalStreamForRecording = isThrottled
+        if let videoSender {
+            configureVideoSender(videoSender)
+        }
     }
 
     private func makeOffer(on peerConnection: RTCPeerConnection) async throws -> RTCSessionDescription {

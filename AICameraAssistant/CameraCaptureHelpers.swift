@@ -45,14 +45,24 @@ func configurePhotoConnection(_ photoOutput: AVCapturePhotoOutput, lensFacing: L
 }
 
 func configureMovieConnection(_ movieOutput: AVCaptureMovieFileOutput, lensFacing: LensFacing) {
-    configureCaptureConnection(movieOutput.connection(with: .video), lensFacing: lensFacing, mirrorsFrontCamera: false)
+    configureCaptureConnection(
+        movieOutput.connection(with: .video),
+        lensFacing: lensFacing,
+        mirrorsFrontCamera: false,
+        videoOrientation: currentInterfaceCaptureVideoOrientation() ?? currentCaptureVideoOrientation()
+    )
 }
 
 
-private func configureCaptureConnection(_ connection: AVCaptureConnection?, lensFacing: LensFacing, mirrorsFrontCamera: Bool = true) {
+private func configureCaptureConnection(
+    _ connection: AVCaptureConnection?,
+    lensFacing: LensFacing,
+    mirrorsFrontCamera: Bool = true,
+    videoOrientation: AVCaptureVideoOrientation? = nil
+) {
     guard let connection else { return }
     if connection.isVideoOrientationSupported {
-        connection.videoOrientation = currentCaptureVideoOrientation()
+        connection.videoOrientation = videoOrientation ?? currentCaptureVideoOrientation()
     }
     if connection.isVideoMirroringSupported {
         connection.automaticallyAdjustsVideoMirroring = false
@@ -61,7 +71,15 @@ private func configureCaptureConnection(_ connection: AVCaptureConnection?, lens
 }
 
 func currentCaptureVideoOrientation() -> AVCaptureVideoOrientation {
-    switch currentDeviceCaptureOrientation() {
+    captureVideoOrientation(for: currentDeviceCaptureOrientation())
+}
+
+func currentInterfaceCaptureVideoOrientation() -> AVCaptureVideoOrientation? {
+    currentInterfaceCaptureOrientation().map(captureVideoOrientation(for:))
+}
+
+private func captureVideoOrientation(for orientation: UIDeviceOrientation) -> AVCaptureVideoOrientation {
+    switch orientation {
     case .landscapeLeft:
         return .landscapeRight
     case .landscapeRight:
