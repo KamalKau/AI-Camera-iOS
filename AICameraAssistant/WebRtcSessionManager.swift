@@ -28,18 +28,66 @@ enum WebRtcConnectionState: String {
 final class LocalFrameSnapshotRenderer: NSObject, RTCVideoRenderer {
     private let lock = NSLock()
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
+    private let recordingQueue = DispatchQueue(label: "webrtc.local-frame-recorder.queue")
     private var latestPixelBuffer: CVPixelBuffer?
     private var latestRotationDegrees = 0
+    private var assetWriter: AVAssetWriter?
+    private var videoInput: AVAssetWriterInput?
+    private var pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor?
+    private var recordingStartTimestampNs: Int64?
+    private var recordingOutputURL: URL?
+    private var isRecordingMirrored = false
+    private var isFinishingRecording = false
+
+    var isRecording: Bool {
+        recordingQueue.sync { assetWriter != nil && !isFinishingRecording }
+    }
 
     func setSize(_ size: CGSize) {}
 
     func renderFrame(_ frame: RTCVideoFrame?) {
         guard let frame,
               let cvBuffer = frame.buffer as? RTCCVPixelBuffer else { return }
+        let pixelBuffer = cvBuffer.pixelBuffer
+        let rotationDegrees = Int(frame.rotation.rawValue)
         lock.lock()
-        latestPixelBuffer = cvBuffer.pixelBuffer
-        latestRotationDegrees = Int(frame.rotation.rawValue)
+        latestPixelBuffer = pixelBuffer
+        latestRotationDegrees = rotationDegrees
         lock.unlock()
+        appendFrame(pixelBuffer, timestampNs: frame.timeStampNs, rotationDegrees: rotationDegrees)
+    }
+
+    func startVideoRecording(to outputURL: URL, isMirrored: Bool) {
+        recordingQueue.async { [weak self] in
+            guard let self else { return }
+            resetRecordingState()
+            recordingOutputURL = outputURL
+            isRecordingMirrored = isMirrored
+            isFinishingRecording = false
+        }
+    }
+
+    func stopVideoRecording(completion: @escaping (URL?) -> Void) {
+        recordingQueue.async { [weak self] in
+            guard let self else {
+                completion(nil)
+                return
+            }
+            guard let writer = assetWriter, let outputURL = recordingOutputURL else {
+                resetRecordingState()
+                completion(nil)
+                return
+            }
+            isFinishingRecording = true
+            videoInput?.markAsFinished()
+            writer.finishWriting { [weak self] in
+                let completedURL = writer.status == .completed ? outputURL : nil
+                self?.recordingQueue.async {
+                    self?.resetRecordingState()
+                    completion(completedURL)
+                }
+            }
+        }
     }
 
     func snapshotImage(isMirrored: Bool, appliesFrameRotation: Bool, correctsFrontLandscapeUpsideDown: Bool) -> UIImage? {
@@ -62,6 +110,92 @@ final class LocalFrameSnapshotRenderer: NSObject, RTCVideoRenderer {
         }
         guard let cgImage = ciContext.createCGImage(image, from: image.extent) else { return nil }
         return UIImage(cgImage: cgImage, scale: UIScreen.main.scale, orientation: .up)
+    }
+
+    private func appendFrame(_ pixelBuffer: CVPixelBuffer, timestampNs: Int64, rotationDegrees: Int) {
+        recordingQueue.async { [weak self] in
+            guard let self,
+                  recordingOutputURL != nil,
+                  !isFinishingRecording else { return }
+            do {
+                if assetWriter == nil {
+                    try startWriter(pixelBuffer: pixelBuffer, timestampNs: timestampNs, rotationDegrees: rotationDegrees)
+                }
+                guard let adaptor = pixelBufferAdaptor,
+                      let input = videoInput,
+                      input.isReadyForMoreMediaData,
+                      let recordingStartTimestampNs else { return }
+                let presentationTime = CMTime(
+                    value: max(0, timestampNs - recordingStartTimestampNs),
+                    timescale: 1_000_000_000
+                )
+                adaptor.append(pixelBuffer, withPresentationTime: presentationTime)
+            } catch {
+                resetRecordingState()
+            }
+        }
+    }
+
+    private func startWriter(pixelBuffer: CVPixelBuffer, timestampNs: Int64, rotationDegrees: Int) throws {
+        guard let recordingOutputURL else { return }
+        try? FileManager.default.removeItem(at: recordingOutputURL)
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let writer = try AVAssetWriter(outputURL: recordingOutputURL, fileType: .mov)
+        let settings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height,
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: 3_000_000,
+                AVVideoExpectedSourceFrameRateKey: 20,
+                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
+            ]
+        ]
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+        input.expectsMediaDataInRealTime = true
+        input.transform = assetTrackTransform(width: width, height: height, rotationDegrees: rotationDegrees, isMirrored: isRecordingMirrored)
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: nil)
+        guard writer.canAdd(input) else { throw WebRtcSessionError.cameraUnavailable }
+        writer.add(input)
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+        assetWriter = writer
+        videoInput = input
+        pixelBufferAdaptor = adaptor
+        recordingStartTimestampNs = timestampNs
+    }
+
+    private func assetTrackTransform(width: Int, height: Int, rotationDegrees: Int, isMirrored: Bool) -> CGAffineTransform {
+        let rotatedTransform: CGAffineTransform
+        let displayWidth: CGFloat
+        switch rotationDegrees {
+        case 90:
+            rotatedTransform = CGAffineTransform(translationX: CGFloat(height), y: 0).rotated(by: .pi / 2)
+            displayWidth = CGFloat(height)
+        case 180:
+            rotatedTransform = CGAffineTransform(translationX: CGFloat(width), y: CGFloat(height)).rotated(by: .pi)
+            displayWidth = CGFloat(width)
+        case 270:
+            rotatedTransform = CGAffineTransform(translationX: 0, y: CGFloat(width)).rotated(by: -.pi / 2)
+            displayWidth = CGFloat(height)
+        default:
+            rotatedTransform = .identity
+            displayWidth = CGFloat(width)
+        }
+        guard isMirrored else { return rotatedTransform }
+        let mirrorTransform = CGAffineTransform(translationX: displayWidth, y: 0).scaledBy(x: -1, y: 1)
+        return rotatedTransform.concatenating(mirrorTransform)
+    }
+
+    private func resetRecordingState() {
+        assetWriter = nil
+        videoInput = nil
+        pixelBufferAdaptor = nil
+        recordingStartTimestampNs = nil
+        recordingOutputURL = nil
+        isRecordingMirrored = false
+        isFinishingRecording = false
     }
 
     private func cgImageOrientation(forWebRtcRotationDegrees degrees: Int) -> CGImagePropertyOrientation {
@@ -225,7 +359,9 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         streamHealthMonitor.cancel()
         capturedLensCommitTask?.cancel()
         capturedLensCommitTask = nil
-        if hostMovieOutput.isRecording { hostMovieOutput.stopRecording() }
+        if localFrameSnapshotRenderer?.isRecording == true {
+            localFrameSnapshotRenderer?.stopVideoRecording { _ in }
+        }
         removeHostMovieOutput()
         cameraCapturer?.stopCapture()
         cameraCapturer = nil
@@ -393,17 +529,16 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
 
     func pauseHostVideoRecording() {
         #if canImport(WebRTC)
-        guard isHostVideoRecording, !isHostVideoPaused, hostMovieOutput.isRecording else { return }
+        guard isHostVideoRecording, !isHostVideoPaused else { return }
         isHostVideoPaused = true
         isPreparingHostVideoRecording = false
-        stopStandaloneAudioRecordingSegment()
-        hostMovieOutput.stopRecording()
+        stopCurrentFrameRecordingSegment(finalizeAfterStop: false)
         #endif
     }
 
     func resumeHostVideoRecording() {
         #if canImport(WebRTC)
-        guard isHostVideoRecording, isHostVideoPaused, !hostMovieOutput.isRecording else { return }
+        guard isHostVideoRecording, isHostVideoPaused, localFrameSnapshotRenderer?.isRecording != true else { return }
         isHostVideoPaused = false
         startHostRecordingSegment()
         #endif
@@ -415,18 +550,13 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         pendingRecordingLensFacing = nil
         shouldFinalizeHostRecording = true
         isHostVideoPaused = false
-        stopStandaloneAudioRecordingSegment()
-        guard hostMovieOutput.isRecording else {
-            finalizeHostRecording(error: nil)
-            return
-        }
-        hostMovieOutput.stopRecording()
+        stopCurrentFrameRecordingSegment(finalizeAfterStop: true)
         #endif
     }
 
     func finishHostVideoRecordingBeforeTeardown() async {
         #if canImport(WebRTC)
-        guard isHostVideoRecording || isPreparingHostVideoRecording || hostMovieOutput.isRecording else { return }
+        guard isHostVideoRecording || isPreparingHostVideoRecording || localFrameSnapshotRenderer?.isRecording == true else { return }
         await withCheckedContinuation { continuation in
             let existingCompletion = hostRecordingCompletion
             var didResume = false
@@ -488,7 +618,6 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         cameraCapturer = capturer
         localVideoTrack = videoTrack
         Self.configureHostPhotoOutput(hostPhotoOutput, on: capturer)
-        Self.configureHostMovieVideoOutput(hostMovieOutput, on: capturer)
         try startCapture(capturer, lensFacing: activeLensFacing)
     }
 
@@ -576,13 +705,13 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     private func switchRecordingLens(to lensFacing: LensFacing) {
         guard pendingRecordingLensFacing != lensFacing else { return }
         pendingRecordingLensFacing = lensFacing
-        guard hostMovieOutput.isRecording else {
+        guard localFrameSnapshotRenderer?.isRecording == true else {
             switchCapture(to: lensFacing) { [weak self] in
                 self?.startHostRecordingSegment()
             }
             return
         }
-        hostMovieOutput.stopRecording()
+        stopCurrentFrameRecordingSegment(finalizeAfterStop: false)
     }
 
     private func switchCapture(to lensFacing: LensFacing, completion: (() -> Void)? = nil) {
@@ -759,37 +888,23 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     }
 
     private func startHostRecordingSegment() {
-        guard isHostVideoRecording, !hostMovieOutput.isRecording, !isPreparingHostVideoRecording else { return }
+        guard isHostVideoRecording,
+              localFrameSnapshotRenderer?.isRecording != true,
+              !isPreparingHostVideoRecording else { return }
         isPreparingHostVideoRecording = true
         Task { @MainActor in
             do {
-                let cameraCapturer = try await readyCameraCapturerForRecording()
-                guard isHostVideoRecording, !isHostVideoPaused, isPreparingHostVideoRecording else { return }
-                if hostMovieOutput.connection(with: .video) == nil {
-                    try await configureHostMovieOutput(on: cameraCapturer, activateAudioSession: false)
-                }
-                guard hostMovieOutput.connection(with: .video) != nil else {
-                    throw WebRtcSessionError.cameraUnavailable
-                }
+                _ = try await readyCameraCapturerForRecording()
+                guard isHostVideoRecording,
+                      !isHostVideoPaused,
+                      isPreparingHostVideoRecording,
+                      let recorder = localFrameSnapshotRenderer else { return }
                 let url = FileManager.default.temporaryDirectory
                     .appendingPathComponent("AI-Camera-\(UUID().uuidString)")
                     .appendingPathExtension("mov")
-                let delegate = MovieCaptureDelegate { [weak self] outputURL, error in
-                    Task { @MainActor in
-                        self?.handleHostRecordingSegmentFinished(outputURL: outputURL, error: error)
-                    }
-                }
-                hostMovieDelegate = delegate
+                recorder.startVideoRecording(to: url, isMirrored: activeLensFacing == .front)
+                startStandaloneAudioRecordingSegment()
                 isPreparingHostVideoRecording = false
-                let movieOutput = hostMovieOutput
-                let recordingLensFacing = activeLensFacing
-                hostCaptureQueue.async { [weak self] in
-                    configureMovieConnection(movieOutput, lensFacing: recordingLensFacing)
-                    movieOutput.startRecording(to: url, recordingDelegate: delegate)
-                    Task { @MainActor in
-                        self?.startStandaloneAudioRecordingSegment()
-                    }
-                }
             } catch {
                 isPreparingHostVideoRecording = false
                 finalizeHostRecording(error: error)
@@ -838,24 +953,31 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         }
     }
 
-    private func handleHostRecordingSegmentFinished(outputURL: URL?, error: Error?) {
-        hostMovieDelegate = nil
-        if let error {
-            finalizeHostRecording(error: error)
-            return
-        }
-        if let outputURL, isUsableRecordingSegment(outputURL) {
-            hostRecordingSegments.append(outputURL)
-        }
-        if let pendingRecordingLensFacing, !shouldFinalizeHostRecording {
-            self.pendingRecordingLensFacing = nil
-            switchCapture(to: pendingRecordingLensFacing) { [weak self] in
-                self?.startHostRecordingSegment()
+    private func stopCurrentFrameRecordingSegment(finalizeAfterStop: Bool) {
+        stopStandaloneAudioRecordingSegment()
+        guard let recorder = localFrameSnapshotRenderer, recorder.isRecording else {
+            if finalizeAfterStop {
+                finalizeHostRecording(error: nil)
             }
             return
         }
-        if shouldFinalizeHostRecording {
-            finalizeHostRecording(error: nil)
+        recorder.stopVideoRecording { [weak self] outputURL in
+            Task { @MainActor in
+                guard let self else { return }
+                if let outputURL, self.isUsableRecordingSegment(outputURL) {
+                    self.hostRecordingSegments.append(outputURL)
+                }
+                if let pendingRecordingLensFacing = self.pendingRecordingLensFacing, !self.shouldFinalizeHostRecording {
+                    self.pendingRecordingLensFacing = nil
+                    self.switchCapture(to: pendingRecordingLensFacing) { [weak self] in
+                        self?.startHostRecordingSegment()
+                    }
+                    return
+                }
+                if finalizeAfterStop || self.shouldFinalizeHostRecording {
+                    self.finalizeHostRecording(error: nil)
+                }
+            }
         }
     }
 
