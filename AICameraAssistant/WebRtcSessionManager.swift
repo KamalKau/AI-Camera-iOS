@@ -483,7 +483,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         #endif
     }
 
-    func captureHostPhoto(wantsPortraitMatte: Bool = false, completion: @escaping (UIImage?, Data?, UIDeviceOrientation, LensFacing, Bool, CIImage?) -> Void) {
+    func captureHostPhoto(aspectRatio: CameraAspectRatio = .full, wantsPortraitMatte: Bool = false, completion: @escaping (UIImage?, Data?, UIDeviceOrientation, LensFacing, Bool, CIImage?) -> Void) {
         #if canImport(WebRTC)
         let capturedDeviceOrientation = currentDeviceCaptureOrientation()
         let capturedLensFacing = activeCaptureDevice.map { $0.position == .front ? LensFacing.front : .back } ?? activeLensFacing

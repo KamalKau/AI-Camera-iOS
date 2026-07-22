@@ -10,6 +10,8 @@ struct WaitingForApprovalScreen: View {
     @State private var zoomLevel = 1.0
     @State private var flashMode = "off"
     @State private var cameraMode = "photo"
+    @State private var aspectRatioMode = RoomSchema.defaultAspectRatioMode
+    @State private var pendingAspectRatioMode: String?
     @State private var isVideoRecording = false
     @State private var isVideoPaused = false
     @State private var errorMessage: String?
@@ -84,7 +86,7 @@ struct WaitingForApprovalScreen: View {
         GeometryReader { geometry in
             let layout = ControllerPreviewLayout(
                 containerSize: geometry.size,
-                aspectRatioMode: room?.aspectRatioMode ?? "full",
+                aspectRatioMode: aspectRatioMode,
                 sourceWidth: room?.previewWidth ?? 0,
                 sourceHeight: room?.previewHeight ?? 0
             )
@@ -94,10 +96,11 @@ struct WaitingForApprovalScreen: View {
 
                 controllerPreviewContent(layout: layout)
                     .frame(width: layout.visibleRect.width, height: layout.visibleRect.height)
+                    .clipped()
                     .contentShape(Rectangle())
                     .simultaneousGesture(previewFocusGesture(layout: layout))
                     .position(x: layout.visibleRect.midX, y: layout.visibleRect.midY)
-                    .clipped()
+                    .id(aspectRatioMode)
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
@@ -624,8 +627,13 @@ struct WaitingForApprovalScreen: View {
                 updateGridEnabled(!(room?.gridEnabled ?? false))
             }
 
-            CameraCircleButton(systemName: "aspectratio") {
-                updateAspectRatioMode((room?.aspectRatioMode ?? "full").nextCameraAspectRatioMode)
+            VStack(spacing: 4) {
+                CameraCircleButton(systemName: "aspectratio") {
+                    updateAspectRatioMode(aspectRatioMode.nextCameraAspectRatioMode)
+                }
+                Text(aspectRatioMode.cameraAspectRatioLabel)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.82))
             }
 
             CameraCircleButton(systemName: "xmark.circle", role: .destructive) {
@@ -719,6 +727,7 @@ struct WaitingForApprovalScreen: View {
                 zoomLevel = nextRoom.zoomLevel
                 flashMode = nextRoom.flashMode.safeCameraFlashMode
                 cameraMode = nextRoom.cameraMode
+                syncAspectRatioModeFromRoom(nextRoom.aspectRatioMode)
                 exposureValue = Double(nextRoom.exposureIndex) / 8.0
                 if !didPrewarmControllerStream {
                     didPrewarmControllerStream = true
@@ -1029,11 +1038,24 @@ struct WaitingForApprovalScreen: View {
         }
     }
 
+    private func syncAspectRatioModeFromRoom(_ mode: String) {
+        let safeMode = RoomSchema.safeAspectRatioMode(mode)
+        if pendingAspectRatioMode == safeMode {
+            pendingAspectRatioMode = nil
+        }
+        guard pendingAspectRatioMode == nil else { return }
+        aspectRatioMode = safeMode
+    }
+
     private func updateAspectRatioMode(_ mode: String) {
+        let safeMode = RoomSchema.safeAspectRatioMode(mode)
+        pendingAspectRatioMode = safeMode
+        aspectRatioMode = safeMode
         Task {
             do {
-                try await services.roomRepository.updateAspectRatioMode(roomCode: roomCode, aspectRatioMode: mode)
+                try await services.roomRepository.updateAspectRatioMode(roomCode: roomCode, aspectRatioMode: safeMode)
             } catch {
+                pendingAspectRatioMode = nil
                 errorMessage = error.localizedDescription
             }
         }

@@ -281,47 +281,38 @@ extension View {
         if aspectRatioMode == "full" {
             frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            aspectRatio(aspectRatioMode.cameraPreviewAspectRatio, contentMode: .fit)
-                .frame(maxWidth: .infinity)
+            GeometryReader { geometry in
+                let targetAspect = aspectRatioMode.cameraPreviewAspectRatio
+                let containerAspect = geometry.size.width / max(geometry.size.height, 1)
+                let size = containerAspect > targetAspect
+                    ? CGSize(width: geometry.size.height * targetAspect, height: geometry.size.height)
+                    : CGSize(width: geometry.size.width, height: geometry.size.width / targetAspect)
+
+                self
+                    .frame(width: size.width, height: size.height)
+                    .clipped()
+                    .contentShape(Rectangle())
+                    .position(x: geometry.size.width / 2.0, y: geometry.size.height / 2.0)
+            }
         }
     }
 }
 
 extension String {
     var nextCameraAspectRatioMode: String {
-        switch self {
-        case "full": return "9_16"
-        case "9_16": return "3_4"
-        case "3_4": return "1_1"
-        default: return "full"
-        }
+        CameraAspectRatio(roomValue: self).next.rawValue
     }
 
     var cameraAspectRatioLabel: String {
-        switch self {
-        case "9_16": return "9:16"
-        case "3_4": return "3:4"
-        case "1_1": return "1:1"
-        default: return "Full"
-        }
+        CameraAspectRatio(roomValue: self).label
     }
 
     var cameraAspectRatioValue: CGFloat? {
-        switch self {
-        case "9_16": return 9.0 / 16.0
-        case "3_4": return 3.0 / 4.0
-        case "1_1": return 1.0
-        default: return nil
-        }
+        CameraAspectRatio(roomValue: self).aspectValue
     }
 
     var cameraPreviewAspectRatio: CGFloat {
-        switch self {
-        case "9_16": return 9.0 / 16.0
-        case "3_4": return 3.0 / 4.0
-        case "1_1": return 1.0
-        default: return 9.0 / 16.0
-        }
+        CameraAspectRatio(roomValue: self).aspectValue ?? (9.0 / 16.0)
     }
 }
 

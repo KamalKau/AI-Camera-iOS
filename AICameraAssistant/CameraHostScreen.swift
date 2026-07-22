@@ -14,6 +14,8 @@ struct CameraHostScreen: View {
     @State private var lastAppliedExposureIndex: Int?
     @State private var focusReticlePoint: CGPoint?
     @State private var exposureValue = 0.0
+    @State private var aspectRatioMode = RoomSchema.defaultAspectRatioMode
+    @State private var pendingAspectRatioMode: String?
     @State private var isPrewarmingHostStream = false
     @State private var hostPreviewLensFacing: LensFacing = .back
     @State private var hostPreviewLensTask: Task<Void, Never>?
@@ -93,8 +95,9 @@ struct CameraHostScreen: View {
                     FocusExposureOverlay(point: focusReticlePoint, exposureValue: $exposureValue)
                 }
             }
-            .cameraPreviewFrame(aspectRatioMode: room?.aspectRatioMode ?? "full")
+            .cameraPreviewFrame(aspectRatioMode: aspectRatioMode)
             .clipped()
+            .id(aspectRatioMode)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .ignoresSafeArea()
@@ -129,8 +132,13 @@ struct CameraHostScreen: View {
                 updateGridEnabled(!(room?.gridEnabled ?? false))
             }
 
-            CameraCircleButton(systemName: "aspectratio") {
-                updateAspectRatioMode((room?.aspectRatioMode ?? "full").nextCameraAspectRatioMode)
+            VStack(spacing: 4) {
+                CameraCircleButton(systemName: "aspectratio") {
+                    updateAspectRatioMode(aspectRatioMode.nextCameraAspectRatioMode)
+                }
+                Text(aspectRatioMode.cameraAspectRatioLabel)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white.opacity(0.82))
             }
 
             CameraCircleButton(systemName: "xmark.circle", role: .destructive) {
@@ -267,6 +275,7 @@ struct CameraHostScreen: View {
                     )
                     applyExposureIfNeeded(nextRoom.exposureIndex)
                 }
+                syncAspectRatioModeFromRoom(nextRoom.aspectRatioMode)
                 exposureValue = Double(nextRoom.exposureIndex) / 8.0
                 prewarmHostStreamIfNeeded(for: nextRoom)
                 handleFocusRequest(nextRoom)
@@ -335,7 +344,7 @@ struct CameraHostScreen: View {
             default:
                 resetCaptureRequest()
                 if services.webRtcSession.state != .idle {
-                    services.webRtcSession.captureHostPhoto(wantsPortraitMatte: false) { image, data, capturedDeviceOrientation, lensFacing, useLandscapeCanvas, _ in
+                    services.webRtcSession.captureHostPhoto(aspectRatio: CameraAspectRatio(roomValue: aspectRatioMode), wantsPortraitMatte: false) { image, data, capturedDeviceOrientation, lensFacing, useLandscapeCanvas, _ in
                         isHandlingRemoteCapture = false
                         Task {
                             await camera.saveCapturedPhotoFromStream(
@@ -344,12 +353,13 @@ struct CameraHostScreen: View {
                                 capturedDeviceOrientation: capturedDeviceOrientation,
                                 lensFacing: lensFacing,
                                 useLandscapeCanvas: useLandscapeCanvas,
+                                aspectRatio: CameraAspectRatio(roomValue: aspectRatioMode),
                                 saveToPhotoLibrary: false
                             )
                         }
                     }
                 } else {
-                    camera.capturePhoto { _ in
+                    camera.capturePhoto(aspectRatio: CameraAspectRatio(roomValue: aspectRatioMode)) { _ in
                         isHandlingRemoteCapture = false
                     }
                 }
@@ -442,8 +452,26 @@ struct CameraHostScreen: View {
         Task { try? await services.roomRepository.updateSceneDetectionEnabled(roomCode: roomCode, sceneDetectionEnabled: enabled) }
     }
 
+    private func syncAspectRatioModeFromRoom(_ mode: String) {
+        let safeMode = RoomSchema.safeAspectRatioMode(mode)
+        if pendingAspectRatioMode == safeMode {
+            pendingAspectRatioMode = nil
+        }
+        guard pendingAspectRatioMode == nil else { return }
+        aspectRatioMode = safeMode
+    }
+
     private func updateAspectRatioMode(_ mode: String) {
-        Task { try? await services.roomRepository.updateAspectRatioMode(roomCode: roomCode, aspectRatioMode: mode) }
+        let safeMode = RoomSchema.safeAspectRatioMode(mode)
+        pendingAspectRatioMode = safeMode
+        aspectRatioMode = safeMode
+        Task {
+            do {
+                try await services.roomRepository.updateAspectRatioMode(roomCode: roomCode, aspectRatioMode: safeMode)
+            } catch {
+                pendingAspectRatioMode = nil
+            }
+        }
     }
 }
 

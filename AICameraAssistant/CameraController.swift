@@ -206,15 +206,17 @@ final class CameraController: NSObject, ObservableObject {
         capturedDeviceOrientation: UIDeviceOrientation,
         lensFacing: LensFacing,
         useLandscapeCanvas: Bool,
+        aspectRatio: CameraAspectRatio = .full,
         portraitEffect: String? = nil,
         portraitStrength: Int = 5,
         portraitMask: CIImage? = nil,
         saveToPhotoLibrary: Bool = true
     ) async {
-        let adjustedImage = image ?? data.flatMap(UIImage.init(data:))
-        let adjustedData = useLandscapeCanvas
-            ? adjustedImage?.landscapeFourThreeJPEGData() ?? data
-            : data
+        let sourceImage = image ?? data.flatMap(UIImage.init(data:))
+        let adjustedImage = sourceImage.map { $0.cropped(to: aspectRatio) }
+        let adjustedData = aspectRatio == .full
+            ? data
+            : adjustedImage?.jpegData(compressionQuality: 0.94) ?? data
         lastCapturedImage = adjustedImage
         await saveCapturedPhoto(
             adjustedImage,
@@ -240,7 +242,7 @@ final class CameraController: NSObject, ObservableObject {
         photoSaveMessage = outcome.message
     }
 
-    func capturePhoto(portraitEffect: String? = nil, portraitStrength: Int = 5, completion: ((UIImage?) -> Void)? = nil) {
+    func capturePhoto(aspectRatio: CameraAspectRatio = .full, portraitEffect: String? = nil, portraitStrength: Int = 5, completion: ((UIImage?) -> Void)? = nil) {
         let selectedFlashMode = flashMode.safeCameraFlashMode
         let capturedLensFacing = lensFacing
         let photoOutput = photoOutput
@@ -251,11 +253,15 @@ final class CameraController: NSObject, ObservableObject {
         let uniqueID = Int64(settings.uniqueID)
         let delegate = PhotoCaptureDelegate { [weak self] image, data, diagnostics in
             Task { @MainActor in
-                self?.lastCapturedImage = image
+                let adjustedImage = image?.cropped(to: aspectRatio)
+                let adjustedData = aspectRatio == .full
+                    ? data
+                    : adjustedImage?.jpegData(compressionQuality: 0.94) ?? data
+                self?.lastCapturedImage = adjustedImage
                 self?.pendingPhotoDelegates[uniqueID] = nil
-                completion?(image)
+                completion?(adjustedImage)
                 Task { @MainActor in
-                    await self?.saveCapturedPhoto(image, data: data, portraitEffect: portraitEffect, portraitStrength: portraitStrength, portraitMask: diagnostics.portraitMask)
+                    await self?.saveCapturedPhoto(adjustedImage, data: adjustedData, portraitEffect: portraitEffect, portraitStrength: portraitStrength, portraitMask: diagnostics.portraitMask)
                 }
             }
         }

@@ -4,6 +4,41 @@ import CoreMotion
 import ImageIO
 import UIKit
 
+enum CameraAspectRatio: String, CaseIterable, Sendable {
+    case full
+    case ratio9x16 = "9_16"
+    case ratio3x4 = "3_4"
+    case square = "1_1"
+
+    var next: CameraAspectRatio {
+        let allCases = Self.allCases
+        guard let index = allCases.firstIndex(of: self) else { return .full }
+        return allCases[(index + 1) % allCases.count]
+    }
+
+    var label: String {
+        switch self {
+        case .full: return "Full"
+        case .ratio9x16: return "9:16"
+        case .ratio3x4: return "3:4"
+        case .square: return "1:1"
+        }
+    }
+
+    var aspectValue: CGFloat? {
+        switch self {
+        case .full: return nil
+        case .ratio9x16: return 9.0 / 16.0
+        case .ratio3x4: return 3.0 / 4.0
+        case .square: return 1.0
+        }
+    }
+
+    init(roomValue: String) {
+        self = Self(rawValue: roomValue) ?? .full
+    }
+}
+
 extension UIImage {
     func normalizedForPortraitProcessing() -> UIImage {
         normalizedForSaving()
@@ -19,24 +54,44 @@ extension UIImage {
         }
     }
 
-    func landscapeFourThreeJPEGData(compressionQuality: CGFloat = 0.94) -> Data? {
+    func cropped(to aspectRatio: CameraAspectRatio) -> UIImage {
+        guard let targetAspect = aspectRatio.aspectValue else { return normalizedForSaving() }
         let sourceImage = normalizedForSaving()
-        guard sourceImage.size.width > sourceImage.size.height else { return nil }
-        let targetSize = CGSize(width: sourceImage.size.width, height: sourceImage.size.width * 3.0 / 4.0)
-        guard targetSize.height > sourceImage.size.height else { return nil }
+        let sourceSize = sourceImage.size
+        guard sourceSize.width > 0, sourceSize.height > 0 else { return sourceImage }
+
+        let sourceAspect = sourceSize.width / sourceSize.height
+        let cropSize: CGSize
+        if sourceAspect > targetAspect {
+            cropSize = CGSize(width: sourceSize.height * targetAspect, height: sourceSize.height)
+        } else {
+            cropSize = CGSize(width: sourceSize.width, height: sourceSize.width / targetAspect)
+        }
+
+        let cropRect = CGRect(
+            x: (sourceSize.width - cropSize.width) / 2.0,
+            y: (sourceSize.height - cropSize.height) / 2.0,
+            width: cropSize.width,
+            height: cropSize.height
+        )
 
         let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
+        format.scale = scale
         format.opaque = true
-        return UIGraphicsImageRenderer(size: targetSize, format: format).image { _ in
-            let scale = max(targetSize.width / sourceImage.size.width, targetSize.height / sourceImage.size.height)
-            let scaledSize = CGSize(width: sourceImage.size.width * scale, height: sourceImage.size.height * scale)
-            let origin = CGPoint(
-                x: (targetSize.width - scaledSize.width) / 2.0,
-                y: (targetSize.height - scaledSize.height) / 2.0
+        return UIGraphicsImageRenderer(size: cropSize, format: format).image { _ in
+            sourceImage.draw(
+                in: CGRect(
+                    x: -cropRect.minX,
+                    y: -cropRect.minY,
+                    width: sourceSize.width,
+                    height: sourceSize.height
+                )
             )
-            sourceImage.draw(in: CGRect(origin: origin, size: scaledSize))
-        }.jpegData(compressionQuality: compressionQuality)
+        }
+    }
+
+    func jpegData(aspectRatio: CameraAspectRatio, compressionQuality: CGFloat = 0.94) -> Data? {
+        cropped(to: aspectRatio).jpegData(compressionQuality: compressionQuality)
     }
 }
 
