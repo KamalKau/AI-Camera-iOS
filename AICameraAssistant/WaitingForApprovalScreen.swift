@@ -36,6 +36,7 @@ struct WaitingForApprovalScreen: View {
     @State private var showManualExposure = false
     @State private var showPortraitControls = false
     @State private var ignoreFocusTapUntil = Date.distantPast
+    @State private var isControllerToolRailExpanded = false
 
     var body: some View {
         ZStack {
@@ -44,11 +45,13 @@ struct WaitingForApprovalScreen: View {
 
             VStack {
                 controllerTopBar
-                Spacer()
                 if room?.controllerApproved == true {
+                    Spacer()
                     controllerControls
                 } else {
+                    Spacer(minLength: 0)
                     approvalStatus
+                    Spacer(minLength: 32)
                 }
             }
             .padding(.horizontal, 16)
@@ -56,10 +59,12 @@ struct WaitingForApprovalScreen: View {
 
             if room?.controllerApproved == true {
                 HStack {
-                    Spacer()
+                    Spacer(minLength: 0)
                     controllerToolRail
                 }
-                .padding(.trailing, 16)
+                .frame(maxWidth: .infinity)
+                .padding(.trailing, 10)
+                .padding(.leading, 10)
             }
 
             if shutterFlashVisible {
@@ -186,28 +191,117 @@ struct WaitingForApprovalScreen: View {
     }
 
     private var controllerTopBar: some View {
-        HStack {
-            CameraStatusPill(primary: "Room \(roomCode)", secondary: statusText)
-            Spacer()
+        VStack(spacing: 10) {
+            ZStack {
+                ControllerTopStatusPill(text: statusText)
+                    .frame(maxWidth: 220)
+                    .frame(maxWidth: .infinity, alignment: .center)
+
+                HStack {
+                    Spacer(minLength: 0)
+                    ControllerEndButton {
+                        endSession()
+                    }
+                }
+            }
+
+            ControllerRoomCodeCard(roomCode: roomCode)
+                .frame(maxWidth: 230)
+                .frame(maxWidth: .infinity, alignment: .center)
         }
     }
 
     private var approvalStatus: some View {
-        VStack(spacing: 12) {
-            ProgressView()
-                .tint(.white)
-            Text(statusText)
-                .font(.subheadline)
-                .foregroundStyle(.white)
+        VStack(spacing: 18) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [Color(red: 0.56, green: 0.33, blue: 1.0), Color(red: 0.22, green: 0.50, blue: 1.0)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 64, height: 64)
+                    .shadow(color: Color(red: 0.48, green: 0.28, blue: 1.0).opacity(0.45), radius: 18, y: 8)
+
+                Image(systemName: room?.status == .denied ? "xmark" : "paperplane.fill")
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+
+            VStack(spacing: 8) {
+                Text(room?.status == .denied ? "Request Denied" : "Request Sent")
+                    .font(.system(size: 24, weight: .black, design: .rounded))
+                    .foregroundStyle(.white)
+
+                Text(room?.status == .denied ? "The camera phone denied this connection." : "Waiting for the camera phone to approve control access.")
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.72))
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.82)
+            }
+
+            HStack(spacing: 8) {
+                Text("ROOM")
+                    .font(.system(size: 11, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.54))
+                Text(roomCode.map(String.init).joined(separator: " "))
+                    .font(.system(size: 16, weight: .black, design: .rounded))
+                    .foregroundStyle(.white)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 9)
+            .background(Color.white.opacity(0.09), in: Capsule())
+            .overlay(Capsule().stroke(.white.opacity(0.14), lineWidth: 1))
+
+            if room?.status == .denied {
+                Button {
+                    returnToStart()
+                } label: {
+                    Text("Enter Another Code")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity, minHeight: 50)
+                        .background(
+                            LinearGradient(
+                                colors: [Color(red: 0.70, green: 0.42, blue: 1.0), Color(red: 0.34, green: 0.08, blue: 1.0)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            ),
+                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        )
+                }
+                .buttonStyle(.plain)
+            } else {
+                ProgressView()
+                    .tint(.white)
+            }
+
             if let errorMessage {
                 Text(errorMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Color(red: 1.0, green: 0.42, blue: 0.48))
                     .multilineTextAlignment(.center)
             }
         }
-        .padding(16)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+        .padding(.horizontal, 22)
+        .padding(.vertical, 24)
+        .frame(maxWidth: 360)
+        .background(
+            LinearGradient(
+                colors: [
+                    Color(red: 0.11, green: 0.07, blue: 0.21).opacity(0.95),
+                    Color.black.opacity(0.84)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 28, style: .continuous)
+        )
+        .overlay(RoundedRectangle(cornerRadius: 28, style: .continuous).stroke(Color(red: 0.55, green: 0.34, blue: 1.0).opacity(0.50), lineWidth: 1))
+        .shadow(color: .black.opacity(0.42), radius: 30, y: 14)
     }
 
     private var previewConnectionOverlayText: String? {
@@ -250,11 +344,10 @@ struct WaitingForApprovalScreen: View {
     private var controllerControls: some View {
         VStack(spacing: 12) {
             controllerAccessoryPanel
-            controllerModeStrip
             controllerPrimaryControls
             controllerStatusOverlays
         }
-        .frame(maxWidth: 430)
+        .frame(maxWidth: .infinity)
     }
 
     @ViewBuilder
@@ -266,7 +359,7 @@ struct WaitingForApprovalScreen: View {
         } else if showZoomBar {
             zoomStrip
         } else {
-            zoomPresetStrip
+            EmptyView()
         }
     }
 
@@ -282,55 +375,44 @@ struct WaitingForApprovalScreen: View {
     }
 
     private var controllerPrimaryControls: some View {
-        HStack(alignment: .center, spacing: 18) {
-            controllerLeftActions
-                .frame(width: 86)
-
-            Spacer(minLength: 0)
-
+        ZStack {
             if isVideoRecording {
                 recordingControls
             } else {
-                VStack(spacing: 8) {
-                    captureModeBadge
+                VStack(spacing: 10) {
                     shutterButton
-                    burstCountPill
+                    controllerModeAndFlipRow
                 }
+                .frame(maxWidth: 320)
             }
-
-            Spacer(minLength: 0)
-
-            controllerRightActions
-                .frame(width: 86)
         }
-        .padding(.horizontal, 14)
+        .padding(.horizontal, 6)
         .padding(.vertical, 10)
-        .background(Color.black.opacity(0.34), in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(.white.opacity(0.14), lineWidth: 1))
     }
 
     private var controllerLeftActions: some View {
-        VStack(spacing: 12) {
-            if cameraMode == "video" {
-                videoHdrButton
-            } else {
-                portraitToggleButton
-            }
-            boomerangButton
-        }
+        EmptyView()
     }
 
     private var controllerRightActions: some View {
         VStack(spacing: 12) {
-            lensFlipButton(size: 58)
-            CameraCircleButton(systemName: "plus.magnifyingglass", size: 46, isSelected: showZoomBar) {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    showManualExposure = false
-                    showPortraitControls = false
-                    showZoomBar.toggle()
-                }
+            EmptyView()
+        }
+    }
+
+    private var controllerModeAndFlipRow: some View {
+        ZStack {
+            controllerModeStrip
+                .frame(maxWidth: .infinity, alignment: .center)
+
+            HStack {
+                Spacer(minLength: 0)
+                lensFlipButton(size: 48)
             }
         }
+        .frame(maxWidth: 320)
+        .padding(.bottom, 10)
+        .offset(y: 8)
     }
 
     @ViewBuilder
@@ -526,16 +608,6 @@ struct WaitingForApprovalScreen: View {
             .frame(height: 14)
     }
 
-    private var burstCountPill: some View {
-        Text("1x")
-            .font(.caption2.monospacedDigit().weight(.semibold))
-            .foregroundStyle(.white.opacity(0.85))
-            .padding(.horizontal, 9)
-            .padding(.vertical, 4)
-            .background(Color.black.opacity(0.36), in: Capsule())
-            .overlay(Capsule().stroke(.white.opacity(0.14), lineWidth: 1))
-    }
-
     private var cameraModeDisplayLabel: String {
         switch cameraMode {
         case "video": return isVideoRecording ? "REC" : "VIDEO"
@@ -591,57 +663,62 @@ struct WaitingForApprovalScreen: View {
                 .font(.caption2.weight(.bold))
                 .tracking(0)
                 .foregroundStyle(cameraMode == mode ? .black : .white.opacity(0.62))
-                .frame(minWidth: 78, minHeight: 30)
+                .frame(minWidth: 64, minHeight: 30)
                 .background(cameraMode == mode ? Color.white : Color.clear, in: Capsule())
         }
         .buttonStyle(.plain)
     }
 
     private var controllerToolRail: some View {
-        VStack(spacing: 14) {
-            CameraCircleButton(systemName: lensFacing == .back ? "camera.rotate" : "camera.rotate.fill") {
-                switchControllerLens()
-            }
-
-            CameraCircleButton(
+        VStack(spacing: 12) {
+            ControllerRailButton(
                 systemName: flashMode.cameraFlashIconName,
+                label: flashMode.cameraFlashLabel,
                 isSelected: flashMode != "off"
             ) {
                 flashMode = flashMode.nextCameraFlashMode
                 publishControls()
             }
 
-            CameraCircleButton(systemName: "sun.max", isSelected: showManualExposure) {
-                withAnimation(.easeInOut(duration: 0.18)) {
-                    showZoomBar = false
-                    showPortraitControls = false
-                    showManualExposure.toggle()
-                }
-            }
-
-            CameraCircleButton(systemName: "sparkles", isSelected: room?.sceneDetectionEnabled == true) {
-                updateSceneDetectionEnabled(!(room?.sceneDetectionEnabled ?? false))
-            }
-
-            CameraCircleButton(systemName: "square.grid.3x3", isSelected: room?.gridEnabled == true) {
+            ControllerRailButton(systemName: "square.grid.3x3", label: "Grid", isSelected: room?.gridEnabled == true) {
                 updateGridEnabled(!(room?.gridEnabled ?? false))
             }
 
-            VStack(spacing: 4) {
-                CameraCircleButton(systemName: "aspectratio") {
-                    updateAspectRatioMode(aspectRatioMode.nextCameraAspectRatioMode)
+            ControllerRailButton(systemName: "aspectratio", label: aspectRatioMode.cameraAspectRatioLabel) {
+                updateAspectRatioMode(aspectRatioMode.nextCameraAspectRatioMode)
+            }
+
+            if isControllerToolRailExpanded {
+                ControllerRailButton(systemName: "plus.magnifyingglass", label: "Zoom", isSelected: showZoomBar) {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        showManualExposure = false
+                        showPortraitControls = false
+                        showZoomBar.toggle()
+                    }
                 }
-                Text(aspectRatioMode.cameraAspectRatioLabel)
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.82))
+
+                ControllerRailButton(systemName: "sun.max", label: "EV", isSelected: showManualExposure) {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        showZoomBar = false
+                        showPortraitControls = false
+                        showManualExposure.toggle()
+                    }
+                }
+
+                ControllerRailButton(systemName: "sparkles", label: "Scene", isSelected: room?.sceneDetectionEnabled == true) {
+                    updateSceneDetectionEnabled(!(room?.sceneDetectionEnabled ?? false))
+                }
             }
 
-            CameraCircleButton(systemName: "xmark.circle", role: .destructive) {
-                endSession()
+            ControllerRailButton(systemName: isControllerToolRailExpanded ? "chevron.up" : "ellipsis", label: isControllerToolRailExpanded ? "Less" : "More") {
+                updateControllerToolRailExpanded(!isControllerToolRailExpanded)
             }
-
         }
-        .padding(.vertical, 10)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 8)
+        .background(Color.black.opacity(0.46), in: Capsule())
+        .overlay(Capsule().stroke(.white.opacity(0.14), lineWidth: 1))
+        .animation(.easeInOut(duration: 0.18), value: isControllerToolRailExpanded)
     }
 
     private var zoomStrip: some View {
@@ -664,17 +741,34 @@ struct WaitingForApprovalScreen: View {
         Button { requestCapture() } label: {
             ZStack {
                 Circle()
-                    .stroke(.white, lineWidth: 4)
-                    .frame(width: 82, height: 82)
-                Circle()
-                    .fill(shutterFillColor)
-                    .frame(width: isCaptureRequesting ? 58 : 64, height: isCaptureRequesting ? 58 : 64)
+                    .stroke(.white.opacity(0.96), lineWidth: 5)
+                    .frame(width: 84, height: 84)
+                if cameraMode == "video", isVideoRecording {
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color.red)
+                        .frame(width: 42, height: 42)
+                } else {
+                    Circle()
+                        .fill(shutterFillColor)
+                        .frame(width: shutterInnerSize, height: shutterInnerSize)
+                }
             }
             .animation(.easeOut(duration: 0.12), value: isCaptureRequesting)
+            .animation(.easeOut(duration: 0.16), value: isVideoRecording)
         }
         .buttonStyle(.plain)
         .disabled(isCaptureRequesting || isSwitchingCameraDuringRecording || room?.status == .ended)
         .accessibilityLabel(cameraMode == "video" ? "Record video" : "Capture photo")
+    }
+
+    private var shutterInnerSize: CGFloat {
+        if isCaptureRequesting {
+            return 58
+        }
+        if cameraMode == "video", isVideoRecording {
+            return 52
+        }
+        return 66
     }
 
     private var shutterFillColor: Color {
@@ -728,6 +822,7 @@ struct WaitingForApprovalScreen: View {
                 flashMode = nextRoom.flashMode.safeCameraFlashMode
                 cameraMode = nextRoom.cameraMode
                 syncAspectRatioModeFromRoom(nextRoom.aspectRatioMode)
+                syncControllerToolRailExpandedFromRoom(nextRoom.toolbarExpanded)
                 exposureValue = Double(nextRoom.exposureIndex) / 8.0
                 if !didPrewarmControllerStream {
                     didPrewarmControllerStream = true
@@ -1047,6 +1142,20 @@ struct WaitingForApprovalScreen: View {
         aspectRatioMode = safeMode
     }
 
+    private func updateControllerToolRailExpanded(_ expanded: Bool) {
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isControllerToolRailExpanded = expanded
+        }
+        Task { try? await services.roomRepository.updateToolbarExpanded(roomCode: roomCode, toolbarExpanded: expanded) }
+    }
+
+    private func syncControllerToolRailExpandedFromRoom(_ expanded: Bool) {
+        guard isControllerToolRailExpanded != expanded else { return }
+        withAnimation(.easeInOut(duration: 0.18)) {
+            isControllerToolRailExpanded = expanded
+        }
+    }
+
     private func updateAspectRatioMode(_ mode: String) {
         let safeMode = RoomSchema.safeAspectRatioMode(mode)
         pendingAspectRatioMode = safeMode
@@ -1098,6 +1207,110 @@ struct WaitingForApprovalScreen: View {
                 await MainActor.run { errorMessage = error.localizedDescription }
             }
         }
+    }
+}
+
+private struct ControllerTopStatusPill: View {
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(Color(red: 0.58, green: 0.34, blue: 1.0))
+                .frame(width: 7, height: 7)
+                .shadow(color: Color(red: 0.58, green: 0.34, blue: 1.0).opacity(0.85), radius: 5)
+            Text(text)
+                .font(.system(size: 12, weight: .bold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+        }
+        .foregroundStyle(.white.opacity(0.88))
+        .padding(.horizontal, 12)
+        .padding(.vertical, 9)
+        .background(Color.black.opacity(0.54), in: Capsule())
+        .overlay(Capsule().stroke(Color(red: 0.58, green: 0.34, blue: 1.0).opacity(0.34), lineWidth: 1))
+    }
+}
+
+private struct ControllerRoomCodeCard: View {
+    let roomCode: String
+
+    private var spacedRoomCode: String {
+        roomCode.map(String.init).joined(separator: " ")
+    }
+
+    var body: some View {
+        Text(spacedRoomCode)
+            .font(.system(size: 18, weight: .black, design: .rounded))
+            .foregroundStyle(.white)
+            .lineLimit(1)
+            .minimumScaleFactor(0.75)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
+            .background(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.13, green: 0.08, blue: 0.24).opacity(0.88),
+                        Color.black.opacity(0.58)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+            )
+            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(Color(red: 0.58, green: 0.34, blue: 1.0).opacity(0.46), lineWidth: 1))
+            .shadow(color: Color(red: 0.36, green: 0.18, blue: 1.0).opacity(0.24), radius: 16, y: 6)
+    }
+}
+
+private struct ControllerEndButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(role: .destructive, action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "power")
+                    .font(.system(size: 12, weight: .black))
+                Text("End")
+                    .font(.system(size: 12, weight: .bold))
+            }
+            .foregroundStyle(Color(red: 1.0, green: 0.34, blue: 0.42))
+            .padding(.horizontal, 13)
+            .padding(.vertical, 9)
+            .background(Color.black.opacity(0.54), in: Capsule())
+            .overlay(Capsule().stroke(Color(red: 1.0, green: 0.34, blue: 0.42).opacity(0.42), lineWidth: 1))
+            .shadow(color: Color(red: 1.0, green: 0.18, blue: 0.30).opacity(0.18), radius: 10, y: 4)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct ControllerRailButton: View {
+    let systemName: String
+    let label: String
+    var role: ButtonRole?
+    var isSelected = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(role: role, action: action) {
+            VStack(spacing: 3) {
+                Image(systemName: systemName)
+                    .font(.system(size: 14, weight: .semibold))
+                    .frame(width: 34, height: 34)
+                    .foregroundStyle(isSelected ? .black : .white)
+                    .background(isSelected ? Color.white : Color.white.opacity(0.11), in: Circle())
+                    .overlay(Circle().stroke(.white.opacity(0.16), lineWidth: 1))
+                Text(label)
+                    .font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.76))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                    .frame(width: 40)
+            }
+        }
+        .buttonStyle(.plain)
     }
 }
 

@@ -53,6 +53,8 @@ actor LocalRoomRepository: RoomRepository {
         try update(roomCode: roomCode) { room in
             room.controllerApproved = true
             room.status = .connected
+            room.aspectRatioMode = RoomSchema.defaultAspectRatioMode
+            room.streamQualityMode = .quality
         }
     }
 
@@ -415,7 +417,9 @@ actor FirestoreRoomRepository: RoomRepository {
         try await update(roomCode: roomCode, values: [
             "requestReceived": false,
             "controllerApproved": true,
-            "status": RoomStatus.connected.rawValue
+            "status": RoomStatus.connected.rawValue,
+            "aspectRatioMode": RoomSchema.defaultAspectRatioMode,
+            "streamQualityMode": StreamQualityMode.quality.rawValue
         ])
     }
 
@@ -902,7 +906,7 @@ actor FirestoreRoomRepository: RoomRepository {
             flashMode: flashMode,
             flashSupported: data["flashSupported"]?.booleanValue ?? true,
             cameraMode: data["cameraMode"]?.stringValue ?? "photo",
-            aspectRatioMode: data["aspectRatioMode"]?.stringValue ?? "full",
+            aspectRatioMode: data["aspectRatioMode"]?.stringValue ?? RoomSchema.defaultAspectRatioMode,
             gridEnabled: data["gridEnabled"]?.booleanValue ?? false,
             nightModeEnabled: data["nightModeEnabled"]?.booleanValue ?? false,
             videoHdrSupported: data["videoHdrSupported"]?.booleanValue ?? false,
@@ -915,7 +919,7 @@ actor FirestoreRoomRepository: RoomRepository {
             exposureMinIndex: data["exposureMinIndex"]?.integerNumberValue ?? 0,
             exposureMaxIndex: data["exposureMaxIndex"]?.integerNumberValue ?? 0,
             exposureIndex: data["exposureIndex"]?.integerNumberValue ?? 0,
-            streamQualityMode: StreamQualityMode(rawValue: data["streamQualityMode"]?.stringValue ?? "") ?? .lowLatency,
+            streamQualityMode: StreamQualityMode(rawValue: data["streamQualityMode"]?.stringValue ?? "") ?? .quality,
             rtcSessionId: data["rtcSessionId"]?.stringValue,
             sessionVersion: data["sessionVersion"]?.int64Value ?? 0,
             previewWidth: data["previewWidth"]?.integerNumberValue ?? 0,
@@ -1208,7 +1212,9 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
         try await update(roomCode: roomCode, values: [
             "requestReceived": false,
             "controllerApproved": true,
-            "status": RoomStatus.connected.rawValue
+            "status": RoomStatus.connected.rawValue,
+            "aspectRatioMode": RoomSchema.defaultAspectRatioMode,
+            "streamQualityMode": StreamQualityMode.quality.rawValue
         ])
     }
 
@@ -1558,7 +1564,7 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
             flashMode: flashMode,
             flashSupported: data["flashSupported"] as? Bool ?? true,
             cameraMode: data["cameraMode"] as? String ?? "photo",
-            aspectRatioMode: data["aspectRatioMode"] as? String ?? "full",
+            aspectRatioMode: data["aspectRatioMode"] as? String ?? RoomSchema.defaultAspectRatioMode,
             gridEnabled: data["gridEnabled"] as? Bool ?? false,
             nightModeEnabled: data["nightModeEnabled"] as? Bool ?? false,
             videoHdrSupported: data["videoHdrSupported"] as? Bool ?? false,
@@ -1571,7 +1577,7 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
             exposureMinIndex: Self.intValue(data["exposureMinIndex"]),
             exposureMaxIndex: Self.intValue(data["exposureMaxIndex"]),
             exposureIndex: Self.intValue(data["exposureIndex"]),
-            streamQualityMode: StreamQualityMode(rawValue: data["streamQualityMode"] as? String ?? "") ?? .lowLatency,
+            streamQualityMode: StreamQualityMode(rawValue: data["streamQualityMode"] as? String ?? "") ?? .quality,
             rtcSessionId: data["rtcSessionId"] as? String,
             sessionVersion: Self.int64Value(data["sessionVersion"]),
             previewWidth: Self.intValue(data["previewWidth"]),

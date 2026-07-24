@@ -220,7 +220,7 @@ final class LocalFrameSnapshotRenderer: NSObject, RTCVideoRenderer {
 @MainActor
 final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManaging {
     @Published private(set) var state: WebRtcConnectionState = .idle
-    @Published private(set) var streamQualityMode: StreamQualityMode = .lowLatency
+    @Published private(set) var streamQualityMode: StreamQualityMode = .quality
     @Published private(set) var capturedLensFacing: LensFacing = .back
     @Published private(set) var decodedVideoFrameCount = 0
     @Published private(set) var reconnectCount = 0
@@ -1234,8 +1234,11 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
 
     private func publishPreviewSize(_ profile: WebRtcStreamProfile) {
         guard let roomCode, let repository = repository as? any RoomCameraControlUpdating else { return }
+        let isLandscape = currentInterfaceCaptureOrientation()?.isLandscape == true
+        let width = isLandscape ? profile.width : profile.height
+        let height = isLandscape ? profile.height : profile.width
         Task {
-            try? await repository.updatePreviewSize(roomCode: roomCode, width: profile.width, height: profile.height)
+            try? await repository.updatePreviewSize(roomCode: roomCode, width: width, height: height)
         }
     }
 

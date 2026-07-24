@@ -1,0 +1,12 @@
+{
+  "images" : [
+    {
+      "filename" : "welcome_camera_wallpaper.png",
+      "idiom" : "universal"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}

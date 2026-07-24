@@ -27,7 +27,7 @@ enum StreamQualityMode: String, Codable, Sendable {
 }
 
 enum RoomSchema {
-    nonisolated static let defaultAspectRatioMode = "full"
+    nonisolated static let defaultAspectRatioMode = "3_4"
     nonisolated static let defaultCameraMode = "photo"
     nonisolated static let defaultCaptureRequestType = "photo"
     nonisolated static let defaultFlashMode = "off"
@@ -250,7 +250,7 @@ struct RoomDocument: Codable, Equatable, Sendable {
             exposureMinIndex: 0,
             exposureMaxIndex: 0,
             exposureIndex: 0,
-            streamQualityMode: .lowLatency,
+            streamQualityMode: .quality,
             rtcSessionId: nil,
             sessionVersion: Int64(Date().timeIntervalSince1970 * 1000),
             previewWidth: 0,

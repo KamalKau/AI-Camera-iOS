@@ -48,11 +48,11 @@ extension StreamQualityMode {
     var webRtcProfile: WebRtcStreamProfile {
         switch self {
         case .lowLatency:
-            return WebRtcStreamProfile(width: 640, height: 360, fps: 20, minBitrate: 600_000, maxBitrate: 1_800_000)
+            return WebRtcStreamProfile(width: 640, height: 480, fps: 20, minBitrate: 700_000, maxBitrate: 2_000_000)
         case .balanced:
-            return WebRtcStreamProfile(width: 854, height: 480, fps: 20, minBitrate: 900_000, maxBitrate: 2_600_000)
+            return WebRtcStreamProfile(width: 960, height: 720, fps: 20, minBitrate: 1_000_000, maxBitrate: 3_000_000)
         case .quality:
-            return WebRtcStreamProfile(width: 1280, height: 720, fps: 20, minBitrate: 1_400_000, maxBitrate: 4_000_000)
+            return WebRtcStreamProfile(width: 1280, height: 960, fps: 20, minBitrate: 1_600_000, maxBitrate: 4_500_000)
         }
     }
 }
