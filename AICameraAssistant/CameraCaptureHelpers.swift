@@ -39,6 +39,111 @@ enum CameraAspectRatio: String, CaseIterable, Sendable {
     }
 }
 
+enum CameraDeviceControls {
+    nonisolated static func applyZoom(to device: AVCaptureDevice, zoomLevel: Double) {
+        do {
+            try device.lockForConfiguration()
+            let maxZoom = device.activeFormat.videoMaxZoomFactor
+            let targetZoom = zoomFactor(for: zoomLevel, device: device, maxZoom: maxZoom)
+            let delta = abs(device.videoZoomFactor - targetZoom)
+            if delta > 0.35 {
+                device.ramp(toVideoZoomFactor: targetZoom, withRate: 16.0)
+            } else {
+                if device.isRampingVideoZoom {
+                    device.cancelVideoZoomRamp()
+                }
+                device.videoZoomFactor = targetZoom
+            }
+            device.unlockForConfiguration()
+        } catch {
+            device.unlockForConfiguration()
+        }
+    }
+
+    nonisolated static func applyExposure(to device: AVCaptureDevice, exposureIndex: Int) {
+        do {
+            try device.lockForConfiguration()
+            let targetBias = Float(exposureIndex) / 2.0
+            let clampedBias = min(device.maxExposureTargetBias, max(device.minExposureTargetBias, targetBias))
+            device.setExposureTargetBias(clampedBias, completionHandler: nil)
+            device.unlockForConfiguration()
+        } catch {
+            device.unlockForConfiguration()
+        }
+    }
+
+    nonisolated static func zoomFactor(for displayZoomLevel: Double, device: AVCaptureDevice, maxZoom: CGFloat) -> CGFloat {
+        let requestedZoom = max(0.5, min(8.0, displayZoomLevel))
+        let mappedZoom = device.deviceType == .builtInUltraWideCamera
+            ? requestedZoom / 0.5
+            : requestedZoom
+        let minZoom = max(1.0, device.minAvailableVideoZoomFactor)
+        return max(minZoom, min(maxZoom, CGFloat(mappedZoom)))
+    }
+}
+
+enum CameraBackDeviceSelection {
+    nonisolated static func preferredDevice(from devices: [AVCaptureDevice] = [], zoomLevel: Double) -> AVCaptureDevice? {
+        if zoomLevel < 1.0, let ultraWideDevice = physicalUltraWideDevice(from: devices) {
+            return ultraWideDevice
+        }
+
+        let preferredTypes: [AVCaptureDevice.DeviceType] = [
+            .builtInWideAngleCamera,
+            .builtInTripleCamera,
+            .builtInDualWideCamera,
+            .builtInDualCamera
+        ]
+
+        for deviceType in preferredTypes {
+            if let device = devices.first(where: { $0.position == .back && $0.deviceType == deviceType }) {
+                return device
+            }
+            if let device = AVCaptureDevice.default(deviceType, for: .video, position: .back) {
+                return device
+            }
+        }
+
+        return devices.first(where: { $0.position == .back })
+    }
+
+    nonisolated static func effectiveZoomLevel(lensFacing: LensFacing, requestedZoomLevel: Double, devices: [AVCaptureDevice] = []) -> Double {
+        let maximumZoom = 8.0
+        guard lensFacing == .back else {
+            return max(1.0, min(maximumZoom, requestedZoomLevel))
+        }
+        let minimumZoom = physicalUltraWideDevice(from: devices) == nil ? 1.0 : 0.5
+        return max(minimumZoom, min(maximumZoom, requestedZoomLevel))
+    }
+
+    nonisolated static func isPreferred(_ device: AVCaptureDevice, zoomLevel: Double) -> Bool {
+        guard device.position == .back else { return false }
+        if zoomLevel < 1.0 {
+            return device.deviceType == .builtInUltraWideCamera
+        }
+        if isVirtualBackCamera(device) {
+            return true
+        }
+        return device.deviceType == .builtInWideAngleCamera
+    }
+
+    private nonisolated static func physicalUltraWideDevice(from devices: [AVCaptureDevice]) -> AVCaptureDevice? {
+        if let device = devices.first(where: { $0.position == .back && $0.deviceType == .builtInUltraWideCamera }) {
+            return device
+        }
+        return AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back)
+    }
+
+    private nonisolated static func isVirtualBackCamera(_ device: AVCaptureDevice) -> Bool {
+        switch device.deviceType {
+        case .builtInTripleCamera, .builtInDualWideCamera, .builtInDualCamera:
+            return true
+        default:
+            return false
+        }
+    }
+}
+
 extension UIImage {
     func normalizedForPortraitProcessing() -> UIImage {
         normalizedForSaving()

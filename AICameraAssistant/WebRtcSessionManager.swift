@@ -406,10 +406,11 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         #endif
     }
 
-    func applyCameraControls(lensFacing: LensFacing, zoomLevel: Double, flashMode: String) {
+    @discardableResult
+    func applyCameraControls(lensFacing: LensFacing, zoomLevel: Double, flashMode: String) -> Double {
         #if canImport(WebRTC)
-        guard role == .host, let cameraCapturer else { return }
-        let clampedZoom = max(0.5, min(8.0, zoomLevel))
+        guard role == .host, let cameraCapturer else { return zoomLevel }
+        let clampedZoom = CameraBackDeviceSelection.effectiveZoomLevel(lensFacing: lensFacing, requestedZoomLevel: zoomLevel, devices: RTCCameraVideoCapturer.captureDevices())
         let shouldSwitchLens = activeLensFacing != lensFacing
         let shouldSwitchZoomLens = !isUsingPreferredCaptureDevice(lensFacing: lensFacing, zoomLevel: clampedZoom)
         activeZoomLevel = clampedZoom
@@ -422,12 +423,15 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
                 } else {
                     applyDeviceControls(zoomLevel: clampedZoom)
                 }
-                return
+                return clampedZoom
             }
             switchCapture(to: lensFacing)
         } else {
             applyDeviceControls(zoomLevel: clampedZoom)
         }
+        return clampedZoom
+        #else
+        return zoomLevel
         #endif
     }
 
@@ -461,7 +465,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         guard activeExposureIndex != clampedIndex else { return }
         activeExposureIndex = clampedIndex
         guard role == .host, let device = activeCaptureDevice else { return }
-        applyExposureOnDevice(device, exposureIndex: clampedIndex)
+        Self.applyExposureOnDevice(device, exposureIndex: clampedIndex)
         #endif
     }
 
@@ -722,10 +726,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     private func isUsingPreferredCaptureDevice(lensFacing: LensFacing, zoomLevel: Double) -> Bool {
         guard let activeCaptureDevice else { return true }
         guard lensFacing == .back else { return activeCaptureDevice.position == .front }
-        if zoomLevel < 1.0 {
-            return activeCaptureDevice.deviceType == .builtInUltraWideCamera
-        }
-        return activeCaptureDevice.position == .back && Self.isPreferredBackZoomDevice(activeCaptureDevice)
+        return CameraBackDeviceSelection.isPreferred(activeCaptureDevice, zoomLevel: zoomLevel)
     }
 
     private func switchCapture(to lensFacing: LensFacing, completion: (() -> Void)? = nil) {
@@ -1243,7 +1244,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
             capturedLensFacing = lensFacing
         }
         applyDeviceControls(zoomLevel: activeZoomLevel)
-        applyExposureOnDevice(device, exposureIndex: activeExposureIndex)
+        Self.applyExposureOnDevice(device, exposureIndex: activeExposureIndex)
     }
 
     private func publishPreviewSize(_ profile: WebRtcStreamProfile) {
@@ -1303,108 +1304,20 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     }
 
     private nonisolated static func applyDeviceControls(_ device: AVCaptureDevice, zoomLevel: Double) {
-        do {
-            try device.lockForConfiguration()
-            let maxZoom = min(device.activeFormat.videoMaxZoomFactor, 8.0)
-            let targetZoom = Self.deviceZoomFactor(for: zoomLevel, device: device, maxZoom: maxZoom)
-            let delta = abs(device.videoZoomFactor - targetZoom)
-            if delta > 0.35 {
-                device.ramp(toVideoZoomFactor: targetZoom, withRate: 16.0)
-            } else {
-                if device.isRampingVideoZoom {
-                    device.cancelVideoZoomRamp()
-                }
-                device.videoZoomFactor = targetZoom
-            }
-            device.unlockForConfiguration()
-        } catch {
-            device.unlockForConfiguration()
-        }
+        CameraDeviceControls.applyZoom(to: device, zoomLevel: zoomLevel)
     }
 
     private nonisolated static func applyExposureOnDevice(_ device: AVCaptureDevice, exposureIndex: Int) {
-        do {
-            try device.lockForConfiguration()
-            let targetBias = Float(exposureIndex) / 2.0
-            let clampedBias = min(device.maxExposureTargetBias, max(device.minExposureTargetBias, targetBias))
-            device.setExposureTargetBias(clampedBias) { _ in }
-            device.unlockForConfiguration()
-        } catch {
-            device.unlockForConfiguration()
-        }
+        CameraDeviceControls.applyExposure(to: device, exposureIndex: exposureIndex)
     }
 
     private func applyDeviceControls(zoomLevel: Double) {
         guard let device = activeCaptureDevice else { return }
-        do {
-            try device.lockForConfiguration()
-            let maxZoom = min(device.activeFormat.videoMaxZoomFactor, 8.0)
-            let targetZoom = Self.deviceZoomFactor(for: zoomLevel, device: device, maxZoom: maxZoom)
-            let delta = abs(device.videoZoomFactor - targetZoom)
-            if delta > 0.35 {
-                device.ramp(toVideoZoomFactor: targetZoom, withRate: 16.0)
-            } else {
-                if device.isRampingVideoZoom {
-                    device.cancelVideoZoomRamp()
-                }
-                device.videoZoomFactor = targetZoom
-            }
-            device.unlockForConfiguration()
-        } catch {
-            device.unlockForConfiguration()
-        }
-    }
-
-    private nonisolated static func deviceZoomFactor(for displayZoomLevel: Double, device: AVCaptureDevice, maxZoom: CGFloat) -> CGFloat {
-        let requestedZoom = max(0.5, min(8.0, displayZoomLevel))
-        let mappedZoom = device.deviceType == .builtInUltraWideCamera
-            ? max(1.0, requestedZoom / 0.5)
-            : requestedZoom
-        return max(1.0, min(maxZoom, CGFloat(mappedZoom)))
+        CameraDeviceControls.applyZoom(to: device, zoomLevel: zoomLevel)
     }
 
     private nonisolated static func preferredBackCaptureDevice(from rtcDevices: [AVCaptureDevice], zoomLevel: Double) -> AVCaptureDevice? {
-        if zoomLevel < 1.0 {
-            if let device = rtcDevices.first(where: { $0.position == .back && $0.deviceType == .builtInUltraWideCamera }) {
-                return device
-            }
-            if let device = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) {
-                return device
-            }
-        }
-        let preferredTypes: [AVCaptureDevice.DeviceType] = [
-            .builtInWideAngleCamera
-        ]
-        for deviceType in preferredTypes {
-            if let device = rtcDevices.first(where: { $0.position == .back && $0.deviceType == deviceType }) {
-                return device
-            }
-            if let device = AVCaptureDevice.default(deviceType, for: .video, position: .back) {
-                return device
-            }
-        }
-        return rtcDevices.first(where: { $0.position == .back }) ?? rtcDevices.first
-    }
-
-    private nonisolated static func isPreferredBackZoomDevice(_ device: AVCaptureDevice) -> Bool {
-        switch device.deviceType {
-        case .builtInUltraWideCamera, .builtInWideAngleCamera:
-            return true
-        default:
-            return false
-        }
-    }
-
-    private func applyExposureOnDevice(_ device: AVCaptureDevice, exposureIndex: Int) {
-        do {
-            try device.lockForConfiguration()
-            let targetBias = Float(exposureIndex) / 2.0
-            let clampedBias = min(device.maxExposureTargetBias, max(device.minExposureTargetBias, targetBias))
-            device.setExposureTargetBias(clampedBias, completionHandler: nil)
-            device.unlockForConfiguration()
-        } catch {
-            device.unlockForConfiguration()
-        }
+        CameraBackDeviceSelection.preferredDevice(from: rtcDevices, zoomLevel: zoomLevel) ?? rtcDevices.first
     }
 
     private func configureVideoSender(_ sender: RTCRtpSender) {

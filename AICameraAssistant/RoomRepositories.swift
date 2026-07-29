@@ -807,6 +807,7 @@ actor FirestoreRoomRepository: RoomRepository {
     }
 
     private static func encodeRoom(_ room: RoomDocument) -> [String: FirestoreValue] {
+        let now = RoomSchema.timestampId()
         var fields: [String: FirestoreValue] = [
             "roomCode": .string(room.roomCode),
             "status": .string(room.status.rawValue),
@@ -862,9 +863,10 @@ actor FirestoreRoomRepository: RoomRepository {
             "sessionVersion": .integer(room.sessionVersion),
             "updatedAt": .timestamp(room.updatedAt)
         ]
-        if let offer = room.offer { fields["offer"] = .string(offer) }
-        if let answer = room.answer { fields["answer"] = .string(answer) }
-        if let rtcSessionId = room.rtcSessionId { fields["rtcSessionId"] = .string(rtcSessionId) }
+        fields.merge(RoomDocumentCompatibilityDefaults.restFields(now: now)) { _, new in new }
+        fields["offer"] = room.offer.map(FirestoreValue.string) ?? .null
+        fields["answer"] = room.answer.map(FirestoreValue.string) ?? .null
+        fields["rtcSessionId"] = room.rtcSessionId.map(FirestoreValue.string) ?? .null
         return fields
     }
 
@@ -1471,7 +1473,8 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
     }
 
     private static func encodeRoom(_ room: RoomDocument) -> [String: Any] {
-        [
+        let now = RoomSchema.timestampId()
+        var fields: [String: Any] = [
             "roomCode": room.roomCode,
             "status": room.status.rawValue,
             "requestReceived": room.requestReceived,
@@ -1525,8 +1528,12 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
             "sceneDetectionAutoAdjustment": room.sceneDetection.autoAdjustment,
             "sessionVersion": room.sessionVersion,
             "updatedAt": Timestamp(date: room.updatedAt),
-            "createdAt": Timestamp(date: Date())
+            "offer": room.offer ?? NSNull(),
+            "answer": room.answer ?? NSNull(),
+            "rtcSessionId": room.rtcSessionId ?? NSNull()
         ]
+        fields.merge(RoomDocumentCompatibilityDefaults.sdkFields(now: now)) { _, new in new }
+        return fields
     }
 
     private static func decodeRoom(_ data: [String: Any]) -> RoomDocument? {

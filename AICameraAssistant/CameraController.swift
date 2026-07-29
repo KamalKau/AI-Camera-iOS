@@ -77,7 +77,7 @@ final class CameraController: NSObject, ObservableObject {
         }
 
         self.lensFacing = lensFacing
-        self.zoomLevel = max(0.5, min(8.0, zoomLevel))
+        self.zoomLevel = CameraBackDeviceSelection.effectiveZoomLevel(lensFacing: lensFacing, requestedZoomLevel: zoomLevel)
         self.flashMode = flashMode.safeCameraFlashMode
         return await configureAndStartForPhotoCapture()
     }
@@ -123,7 +123,7 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     func apply(lensFacing: LensFacing, zoomLevel: Double, flashMode: String) {
-        let clampedZoom = max(0.5, min(8.0, zoomLevel))
+        let clampedZoom = CameraBackDeviceSelection.effectiveZoomLevel(lensFacing: lensFacing, requestedZoomLevel: zoomLevel)
         let shouldSwitchLens = self.lensFacing != lensFacing
         let shouldSwitchZoomLens = !isUsingPreferredDevice(lensFacing: lensFacing, zoomLevel: clampedZoom)
         self.lensFacing = lensFacing
@@ -389,35 +389,11 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private func applyZoomOnQueue(_ zoomLevel: Double, device: AVCaptureDevice) {
-        do {
-            try device.lockForConfiguration()
-            let maxZoom = min(device.activeFormat.videoMaxZoomFactor, 8.0)
-            let targetZoom = Self.deviceZoomFactor(for: zoomLevel, device: device, maxZoom: maxZoom)
-            let delta = abs(device.videoZoomFactor - targetZoom)
-            if delta > 0.35 {
-                device.ramp(toVideoZoomFactor: targetZoom, withRate: 16.0)
-            } else {
-                if device.isRampingVideoZoom {
-                    device.cancelVideoZoomRamp()
-                }
-                device.videoZoomFactor = targetZoom
-            }
-            device.unlockForConfiguration()
-        } catch {
-            device.unlockForConfiguration()
-        }
+        CameraDeviceControls.applyZoom(to: device, zoomLevel: zoomLevel)
     }
 
     private func applyExposureOnQueue(_ exposureIndex: Int, device: AVCaptureDevice) {
-        do {
-            try device.lockForConfiguration()
-            let targetBias = Float(exposureIndex) / 2.0
-            let clampedBias = min(device.maxExposureTargetBias, max(device.minExposureTargetBias, targetBias))
-            device.setExposureTargetBias(clampedBias, completionHandler: nil)
-            device.unlockForConfiguration()
-        } catch {
-            device.unlockForConfiguration()
-        }
+        CameraDeviceControls.applyExposure(to: device, exposureIndex: exposureIndex)
     }
 
     private static func currentPermissionState() -> PermissionState {
@@ -436,47 +412,16 @@ final class CameraController: NSObject, ObservableObject {
     private func isUsingPreferredDevice(lensFacing: LensFacing, zoomLevel: Double) -> Bool {
         guard let device = currentInput?.device else { return true }
         guard lensFacing == .back else { return device.position == .front }
-        if zoomLevel < 1.0 {
-            return device.deviceType == .builtInUltraWideCamera
-        }
-        return device.position == .back && Self.isPreferredBackZoomDevice(device)
+        return CameraBackDeviceSelection.isPreferred(device, zoomLevel: zoomLevel)
     }
 
     private static func makeDevice(for lensFacing: LensFacing, zoomLevel: Double) throws -> AVCaptureDevice {
         let position: AVCaptureDevice.Position = lensFacing == .back ? .back : .front
-        if lensFacing == .back {
-            if zoomLevel < 1.0,
-               let device = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back) {
-                return device
-            }
-            let preferredTypes: [AVCaptureDevice.DeviceType] = [
-                .builtInWideAngleCamera
-            ]
-            for deviceType in preferredTypes {
-                if let device = AVCaptureDevice.default(deviceType, for: .video, position: .back) {
-                    return device
-                }
-            }
+        if lensFacing == .back, let device = CameraBackDeviceSelection.preferredDevice(zoomLevel: zoomLevel) {
+            return device
         }
         if let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position) { return device }
         throw AVError(.deviceNotConnected)
-    }
-
-    private static func deviceZoomFactor(for displayZoomLevel: Double, device: AVCaptureDevice, maxZoom: CGFloat) -> CGFloat {
-        let requestedZoom = max(0.5, min(8.0, displayZoomLevel))
-        let mappedZoom = device.deviceType == .builtInUltraWideCamera
-            ? max(1.0, requestedZoom / 0.5)
-            : requestedZoom
-        return max(1.0, min(maxZoom, CGFloat(mappedZoom)))
-    }
-
-    private static func isPreferredBackZoomDevice(_ device: AVCaptureDevice) -> Bool {
-        switch device.deviceType {
-        case .builtInUltraWideCamera, .builtInWideAngleCamera:
-            return true
-        default:
-            return false
-        }
     }
 
     private func saveCapturedPhoto(

@@ -356,7 +356,7 @@ struct CameraHostScreen: View {
 
     private func observeRoom() async {
         do {
-            for try await nextRoom in await services.roomRepository.observeRoom(roomCode: roomCode) {
+            for try await nextRoom in await services.roomReader.observeRoom(roomCode: roomCode) {
                 room = nextRoom
                 hostPreviewLensTask?.cancel()
                 hostPreviewLensFacing = services.webRtcSession.capturedLensFacing
@@ -370,17 +370,20 @@ struct CameraHostScreen: View {
                     continue
                 }
                 services.webRtcSession.applyStreamQualityMode(nextRoom.streamQualityMode)
+                let appliedZoomLevel: Double
                 if services.webRtcSession.state == .idle {
                     camera.apply(lensFacing: nextRoom.lensFacing, zoomLevel: nextRoom.zoomLevel, flashMode: nextRoom.flashMode)
                     camera.applyExposureIndex(nextRoom.exposureIndex)
+                    appliedZoomLevel = camera.zoomLevel
                 } else {
-                    services.webRtcSession.applyCameraControls(
+                    appliedZoomLevel = services.webRtcSession.applyCameraControls(
                         lensFacing: nextRoom.lensFacing,
                         zoomLevel: nextRoom.zoomLevel,
                         flashMode: nextRoom.flashMode
                     )
                     applyExposureIfNeeded(nextRoom.exposureIndex)
                 }
+                publishCorrectedZoomIfNeeded(appliedZoomLevel, requestedZoomLevel: nextRoom.zoomLevel)
                 syncAspectRatioModeFromRoom(nextRoom.aspectRatioMode)
                 syncToolbarExpandedFromRoom(nextRoom.toolbarExpanded)
                 exposureValue = Double(nextRoom.exposureIndex) / 8.0
@@ -506,7 +509,7 @@ struct CameraHostScreen: View {
     }
 
     private func resetCaptureRequest() {
-        Task { try? await services.roomRepository.resetCaptureRequest(roomCode: roomCode) }
+        Task { try? await services.roomCaptureRequester.resetCaptureRequest(roomCode: roomCode) }
     }
 
     private func handleFocusRequest(_ room: RoomDocument) {
@@ -535,7 +538,7 @@ struct CameraHostScreen: View {
         isPrewarmingHostStream = true
         Task {
             await camera.stopAndWait()
-            await services.webRtcSession.startHost(roomCode: roomCode, repository: services.roomRepository)
+            await services.webRtcSession.startHost(roomCode: roomCode, repository: services.roomSignalingRepository)
             isPrewarmingHostStream = false
         }
     }
@@ -550,13 +553,13 @@ struct CameraHostScreen: View {
         Task {
             do {
                 if approved {
-                    try await services.roomRepository.approveController(roomCode: roomCode)
+                    try await services.roomConnectionManager.approveController(roomCode: roomCode)
                     if services.webRtcSession.state == .idle {
                         await camera.stopAndWait()
-                        await services.webRtcSession.startHost(roomCode: roomCode, repository: services.roomRepository)
+                        await services.webRtcSession.startHost(roomCode: roomCode, repository: services.roomSignalingRepository)
                     }
                 } else {
-                    try await services.roomRepository.denyController(roomCode: roomCode)
+                    try await services.roomConnectionManager.denyController(roomCode: roomCode)
                 }
             } catch {
                 errorMessage = error.localizedDescription
@@ -567,7 +570,7 @@ struct CameraHostScreen: View {
     private func endSession() {
         Task {
             do {
-                try await services.roomRepository.endSession(roomCode: roomCode)
+                try await services.roomConnectionManager.endSession(roomCode: roomCode)
                 await returnToStart()
             } catch {
                 errorMessage = error.localizedDescription
@@ -584,39 +587,46 @@ struct CameraHostScreen: View {
 
     private func publishCurrentControls() {
         Task {
-            try? await services.roomRepository.updateControls(roomCode: roomCode, lensFacing: camera.lensFacing, zoomLevel: camera.zoomLevel, flashMode: camera.flashMode)
+            try? await services.roomCameraControlUpdater.updateControls(roomCode: roomCode, lensFacing: camera.lensFacing, zoomLevel: camera.zoomLevel, flashMode: camera.flashMode)
+        }
+    }
+
+    private func publishCorrectedZoomIfNeeded(_ appliedZoomLevel: Double, requestedZoomLevel: Double) {
+        guard abs(appliedZoomLevel - requestedZoomLevel) > 0.001 else { return }
+        Task {
+            try? await services.roomCameraControlUpdater.updateZoomLevel(roomCode: roomCode, zoomLevel: appliedZoomLevel)
         }
     }
 
     private func updateGridEnabled(_ enabled: Bool) {
-        Task { try? await services.roomRepository.updateGridEnabled(roomCode: roomCode, gridEnabled: enabled) }
+        Task { try? await services.roomCameraControlUpdater.updateGridEnabled(roomCode: roomCode, gridEnabled: enabled) }
     }
 
     private func updateSceneDetectionEnabled(_ enabled: Bool) {
-        Task { try? await services.roomRepository.updateSceneDetectionEnabled(roomCode: roomCode, sceneDetectionEnabled: enabled) }
+        Task { try? await services.roomCameraControlUpdater.updateSceneDetectionEnabled(roomCode: roomCode, sceneDetectionEnabled: enabled) }
     }
 
     private func updateCameraMode(_ mode: String) {
-        Task { try? await services.roomRepository.updateCameraMode(roomCode: roomCode, cameraMode: mode) }
+        Task { try? await services.roomCameraControlUpdater.updateCameraMode(roomCode: roomCode, cameraMode: mode) }
     }
 
     private func updateFlashMode(_ mode: String) {
-        Task { try? await services.roomRepository.updateFlashMode(roomCode: roomCode, flashMode: mode) }
+        Task { try? await services.roomCameraControlUpdater.updateFlashMode(roomCode: roomCode, flashMode: mode) }
     }
 
     private func updateNightModeEnabled(_ enabled: Bool) {
-        Task { try? await services.roomRepository.updateNightModeEnabled(roomCode: roomCode, nightModeEnabled: enabled) }
+        Task { try? await services.roomCameraControlUpdater.updateNightModeEnabled(roomCode: roomCode, nightModeEnabled: enabled) }
     }
 
     private func updateVideoHdrEnabled(_ enabled: Bool) {
-        Task { try? await services.roomRepository.updateVideoHdrEnabled(roomCode: roomCode, videoHdrEnabled: enabled) }
+        Task { try? await services.roomCameraControlUpdater.updateVideoHdrEnabled(roomCode: roomCode, videoHdrEnabled: enabled) }
     }
 
     private func updateToolbarExpanded(_ expanded: Bool) {
         withAnimation(.easeInOut(duration: 0.18)) {
             isHostToolRailExpanded = expanded
         }
-        Task { try? await services.roomRepository.updateToolbarExpanded(roomCode: roomCode, toolbarExpanded: expanded) }
+        Task { try? await services.roomCameraControlUpdater.updateToolbarExpanded(roomCode: roomCode, toolbarExpanded: expanded) }
     }
 
     private func syncToolbarExpandedFromRoom(_ expanded: Bool) {
@@ -641,7 +651,7 @@ struct CameraHostScreen: View {
         aspectRatioMode = safeMode
         Task {
             do {
-                try await services.roomRepository.updateAspectRatioMode(roomCode: roomCode, aspectRatioMode: safeMode)
+                try await services.roomCameraControlUpdater.updateAspectRatioMode(roomCode: roomCode, aspectRatioMode: safeMode)
             } catch {
                 pendingAspectRatioMode = nil
             }

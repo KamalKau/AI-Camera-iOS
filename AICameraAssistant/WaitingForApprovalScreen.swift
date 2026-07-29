@@ -608,7 +608,7 @@ struct WaitingForApprovalScreen: View {
 
             Slider(value: $exposureValue, in: -1.0...1.0, step: 0.125)
                 .tint(.yellow)
-                .onChange(of: exposureValue) { value in publishExposureDebounced(value) }
+                .onChange(of: exposureValue) { _, value in publishExposureDebounced(value) }
         }
         .foregroundStyle(.white)
         .padding(.horizontal, 12)
@@ -1193,7 +1193,7 @@ struct WaitingForApprovalScreen: View {
 
     private func observeRoom() async {
         do {
-            for try await nextRoom in await services.roomRepository.observeRoom(roomCode: roomCode) {
+            for try await nextRoom in await services.roomReader.observeRoom(roomCode: roomCode) {
                 room = nextRoom
                 if nextRoom.status == .ended {
                     returnToStart()
@@ -1226,7 +1226,7 @@ struct WaitingForApprovalScreen: View {
                 exposureValue = Double(nextRoom.exposureIndex) / 8.0
                 if !didPrewarmControllerStream {
                     didPrewarmControllerStream = true
-                    await services.webRtcSession.startController(roomCode: roomCode, repository: services.roomRepository)
+                    await services.webRtcSession.startController(roomCode: roomCode, repository: services.roomSignalingRepository)
                 }
                 if !nextRoom.controllerApproved {
                     cancelFirstFrameRetry()
@@ -1296,7 +1296,7 @@ struct WaitingForApprovalScreen: View {
 
             if cameraMode == "video" && isVideoRecording {
                 do {
-                    try await services.roomRepository.updateControls(
+                    try await services.roomCameraControlUpdater.updateControls(
                         roomCode: roomCode,
                         lensFacing: nextLensFacing,
                         zoomLevel: zoomLevel,
@@ -1328,7 +1328,7 @@ struct WaitingForApprovalScreen: View {
         zoomPublishTask?.cancel()
         Task {
             do {
-                try await services.roomRepository.updateControls(roomCode: roomCode, lensFacing: lensFacing, zoomLevel: zoomLevel, flashMode: flashMode)
+                try await services.roomCameraControlUpdater.updateControls(roomCode: roomCode, lensFacing: lensFacing, zoomLevel: zoomLevel, flashMode: flashMode)
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -1345,7 +1345,7 @@ struct WaitingForApprovalScreen: View {
             try? await Task.sleep(for: .milliseconds(140))
             guard !Task.isCancelled else { return }
             do {
-                try await services.roomRepository.updateZoomLevel(roomCode: roomCode, zoomLevel: zoomLevel)
+                try await services.roomCameraControlUpdater.updateZoomLevel(roomCode: roomCode, zoomLevel: zoomLevel)
             } catch {
                 await MainActor.run { errorMessage = error.localizedDescription }
             }
@@ -1395,7 +1395,7 @@ struct WaitingForApprovalScreen: View {
 
         Task {
             do {
-                try await services.roomRepository.updateZoomLevel(roomCode: roomCode, zoomLevel: levelToPublish)
+                try await services.roomCameraControlUpdater.updateZoomLevel(roomCode: roomCode, zoomLevel: levelToPublish)
             } catch {
                 await MainActor.run { errorMessage = error.localizedDescription }
             }
@@ -1425,7 +1425,7 @@ struct WaitingForApprovalScreen: View {
         captureFeedback = isVideoPaused ? "Resuming..." : "Pausing..."
         Task {
             do {
-                try await services.roomRepository.requestCapture(roomCode: roomCode, type: requestType)
+                try await services.roomCaptureRequester.requestCapture(roomCode: roomCode, type: requestType)
                 isVideoPaused.toggle()
                 captureFeedback = isVideoPaused ? "Recording paused" : "Recording resumed"
                 isCaptureRequesting = false
@@ -1459,7 +1459,7 @@ struct WaitingForApprovalScreen: View {
         }
         Task {
             do {
-                try await services.roomRepository.requestCapture(roomCode: roomCode, type: requestType)
+                try await services.roomCaptureRequester.requestCapture(roomCode: roomCode, type: requestType)
                 if requestType == "video_start" {
                     isVideoRecording = true
                     isVideoPaused = false
@@ -1509,10 +1509,10 @@ struct WaitingForApprovalScreen: View {
         Task {
             do {
                 if shouldStopActiveVideo {
-                    try await services.roomRepository.requestCapture(roomCode: roomCode, type: "video_stop")
+                    try await services.roomCaptureRequester.requestCapture(roomCode: roomCode, type: "video_stop")
                     captureFeedback = "Recording stopped"
                 }
-                try await services.roomRepository.updateCameraMode(roomCode: roomCode, cameraMode: mode)
+                try await services.roomCameraControlUpdater.updateCameraMode(roomCode: roomCode, cameraMode: mode)
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -1522,7 +1522,7 @@ struct WaitingForApprovalScreen: View {
     private func endSession() {
         Task {
             do {
-                try await services.roomRepository.endSession(roomCode: roomCode)
+                try await services.roomConnectionManager.endSession(roomCode: roomCode)
                 returnToStart()
             } catch {
                 errorMessage = error.localizedDescription
@@ -1551,7 +1551,7 @@ struct WaitingForApprovalScreen: View {
     private func updateGridEnabled(_ enabled: Bool) {
         Task {
             do {
-                try await services.roomRepository.updateGridEnabled(roomCode: roomCode, gridEnabled: enabled)
+                try await services.roomCameraControlUpdater.updateGridEnabled(roomCode: roomCode, gridEnabled: enabled)
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -1561,7 +1561,7 @@ struct WaitingForApprovalScreen: View {
     private func updateVideoHdrEnabled(_ enabled: Bool) {
         Task {
             do {
-                try await services.roomRepository.updateVideoHdrEnabled(roomCode: roomCode, videoHdrEnabled: enabled)
+                try await services.roomCameraControlUpdater.updateVideoHdrEnabled(roomCode: roomCode, videoHdrEnabled: enabled)
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -1571,7 +1571,7 @@ struct WaitingForApprovalScreen: View {
     private func updatePortraitControls(strength: Int, effect: String) {
         Task {
             do {
-                try await services.roomRepository.updatePortraitControls(
+                try await services.roomCameraControlUpdater.updatePortraitControls(
                     roomCode: roomCode,
                     blurLevel: room?.portraitBlurLevel ?? "blur",
                     strength: strength,
@@ -1586,7 +1586,7 @@ struct WaitingForApprovalScreen: View {
     private func updateSceneDetectionEnabled(_ enabled: Bool) {
         Task {
             do {
-                try await services.roomRepository.updateSceneDetectionEnabled(roomCode: roomCode, sceneDetectionEnabled: enabled)
+                try await services.roomCameraControlUpdater.updateSceneDetectionEnabled(roomCode: roomCode, sceneDetectionEnabled: enabled)
             } catch {
                 errorMessage = error.localizedDescription
             }
@@ -1606,7 +1606,7 @@ struct WaitingForApprovalScreen: View {
         withAnimation(.easeInOut(duration: 0.18)) {
             isControllerToolRailExpanded = expanded
         }
-        Task { try? await services.roomRepository.updateToolbarExpanded(roomCode: roomCode, toolbarExpanded: expanded) }
+        Task { try? await services.roomCameraControlUpdater.updateToolbarExpanded(roomCode: roomCode, toolbarExpanded: expanded) }
     }
 
     private func syncControllerToolRailExpandedFromRoom(_ expanded: Bool) {
@@ -1622,7 +1622,7 @@ struct WaitingForApprovalScreen: View {
         aspectRatioMode = safeMode
         Task {
             do {
-                try await services.roomRepository.updateAspectRatioMode(roomCode: roomCode, aspectRatioMode: safeMode)
+                try await services.roomCameraControlUpdater.updateAspectRatioMode(roomCode: roomCode, aspectRatioMode: safeMode)
             } catch {
                 pendingAspectRatioMode = nil
                 errorMessage = error.localizedDescription
@@ -1640,7 +1640,7 @@ struct WaitingForApprovalScreen: View {
         }
         Task {
             do {
-                try await services.roomRepository.updateFocusRequest(
+                try await services.roomCameraControlUpdater.updateFocusRequest(
                     roomCode: roomCode,
                     x: sourcePoint.x,
                     y: sourcePoint.y,
@@ -1659,7 +1659,7 @@ struct WaitingForApprovalScreen: View {
             try? await Task.sleep(for: .milliseconds(180))
             guard !Task.isCancelled else { return }
             do {
-                try await services.roomRepository.updateExposureIndex(
+                try await services.roomCameraControlUpdater.updateExposureIndex(
                     roomCode: roomCode,
                     exposureIndex: Int((value * 8.0).rounded())
                 )

@@ -27,11 +27,13 @@ enum StreamQualityMode: String, Codable, Sendable {
 }
 
 enum RoomSchema {
-    nonisolated static let defaultAspectRatioMode = "3_4"
+    nonisolated static let defaultAspectRatioMode = "full"
     nonisolated static let defaultCameraMode = "photo"
     nonisolated static let defaultCaptureRequestType = "photo"
     nonisolated static let defaultFlashMode = "off"
     nonisolated static let defaultSceneDetectionKey = "auto"
+    nonisolated static let defaultSceneDetectionLabel = "Auto"
+    nonisolated static let defaultSceneDetectionSuggestion = "Scene detection ready"
     nonisolated static let defaultPortraitEffect = "blur"
     nonisolated static let defaultPortraitStrength = 5
     nonisolated static let aspectRatioModes = ["full", "9_16", "3_4", "1_1"]
@@ -150,8 +152,8 @@ struct SceneDetectionState: Codable, Equatable, Sendable {
 
     nonisolated static let empty = SceneDetectionState(
         key: RoomSchema.defaultSceneDetectionKey,
-        label: "",
-        suggestion: "",
+        label: RoomSchema.defaultSceneDetectionLabel,
+        suggestion: RoomSchema.defaultSceneDetectionSuggestion,
         confidence: 0,
         timestamp: 0,
         autoAdjustment: ""
@@ -235,7 +237,7 @@ struct RoomDocument: Codable, Equatable, Sendable {
             maxZoom: 8.0,
             flashEnabled: false,
             flashMode: RoomSchema.defaultFlashMode,
-            flashSupported: true,
+            flashSupported: false,
             cameraMode: RoomSchema.defaultCameraMode,
             aspectRatioMode: RoomSchema.defaultAspectRatioMode,
             gridEnabled: false,
@@ -258,7 +260,7 @@ struct RoomDocument: Codable, Equatable, Sendable {
             portraitBlurLevel: "blur",
             portraitStrength: 5,
             portraitEffect: "blur",
-            portraitStatus: "finding",
+            portraitStatus: "Finding subject...",
             portraitFaceLeft: 0,
             portraitFaceTop: 0,
             portraitFaceRight: 0,
@@ -284,65 +286,6 @@ extension String {
         trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
     }
 }
-
-protocol RoomCreating: Sendable {
-    func createRoom() async throws -> RoomDocument
-}
-
-protocol RoomReading: Sendable {
-    func room(roomCode: String) async throws -> RoomDocument?
-    func observeRoom(roomCode: String) async -> AsyncThrowingStream<RoomDocument, Error>
-}
-
-protocol RoomConnectionManaging: Sendable {
-    func requestConnection(roomCode: String) async throws
-    func approveController(roomCode: String) async throws
-    func denyController(roomCode: String) async throws
-    func endSession(roomCode: String) async throws
-}
-
-protocol RoomCameraControlUpdating: Sendable {
-    func updateControls(roomCode: String, lensFacing: LensFacing, zoomLevel: Double, flashMode: String) async throws
-    func updateLensFacing(roomCode: String, lensFacing: LensFacing) async throws
-    func updateZoomLevel(roomCode: String, zoomLevel: Double) async throws
-    func updateZoomRange(roomCode: String, minZoom: Double, maxZoom: Double) async throws
-    func updateFlashMode(roomCode: String, flashMode: String) async throws
-    func updateCameraMode(roomCode: String, cameraMode: String) async throws
-    func updateGridEnabled(roomCode: String, gridEnabled: Bool) async throws
-    func updateNightModeEnabled(roomCode: String, nightModeEnabled: Bool) async throws
-    func updateVideoHdrEnabled(roomCode: String, videoHdrEnabled: Bool) async throws
-    func updateToolbarExpanded(roomCode: String, toolbarExpanded: Bool) async throws
-    func updatePortraitControls(roomCode: String, blurLevel: String, strength: Int, effect: String) async throws
-    func updatePortraitSubjectState(roomCode: String, state: PortraitSubjectState) async throws
-    func updateFaceDetectionOverlay(roomCode: String, state: FaceDetectionOverlayState) async throws
-    func updateSceneDetectionEnabled(roomCode: String, sceneDetectionEnabled: Bool) async throws
-    func updateSceneDetectionState(roomCode: String, state: SceneDetectionState) async throws
-    func updateAspectRatioMode(roomCode: String, aspectRatioMode: String) async throws
-    func updateFocusRequest(roomCode: String, x: Double, y: Double, requestId: Int64, lockEnabled: Bool) async throws
-    func updateExposureState(roomCode: String, state: ExposureState) async throws
-    func updateExposureIndex(roomCode: String, exposureIndex: Int) async throws
-    func updateFlashSupported(roomCode: String, flashSupported: Bool) async throws
-    func updatePreviewSize(roomCode: String, width: Int, height: Int) async throws
-}
-
-protocol RoomCaptureRequesting: Sendable {
-    func requestCapture(roomCode: String, type: String) async throws
-    func resetCaptureRequest(roomCode: String) async throws
-}
-
-protocol RoomSignaling: Sendable {
-    func setOffer(_ sdp: String, roomCode: String, rtcSessionId: String) async throws
-    func setAnswer(_ sdp: String, roomCode: String, rtcSessionId: String) async throws
-    func addCameraCandidate(_ candidate: IceCandidatePayload, roomCode: String, rtcSessionId: String) async throws
-    func addControllerCandidate(_ candidate: IceCandidatePayload, roomCode: String, rtcSessionId: String) async throws
-    func clearIceCandidates(roomCode: String) async throws
-    func cameraCandidates(roomCode: String, rtcSessionId: String?) async throws -> [IceCandidatePayload]
-    func controllerCandidates(roomCode: String, rtcSessionId: String?) async throws -> [IceCandidatePayload]
-}
-
-protocol RoomSignalingRepository: RoomReading, RoomSignaling {}
-
-protocol RoomRepository: RoomCreating, RoomConnectionManaging, RoomCameraControlUpdating, RoomCaptureRequesting, RoomSignalingRepository {}
 
 extension RoomDocument {
     var captureRequestState: CaptureRequestState {

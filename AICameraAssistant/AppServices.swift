@@ -13,6 +13,9 @@ final class AppServices: ObservableObject {
     var roomCreator: any RoomCreating { roomRepository }
     var roomReader: any RoomReading { roomRepository }
     var roomConnectionManager: any RoomConnectionManaging { roomRepository }
+    var roomCameraControlUpdater: any RoomCameraControlUpdating { roomRepository }
+    var roomCaptureRequester: any RoomCaptureRequesting { roomRepository }
+    var roomSignalingRepository: any RoomSignalingRepository { roomRepository }
 
     init() {
         self.roomRepository = Self.makeRoomRepository()
