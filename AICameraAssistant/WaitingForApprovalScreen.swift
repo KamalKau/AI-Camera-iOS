@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct WaitingForApprovalScreen: View {
     let roomCode: String
@@ -37,11 +38,19 @@ struct WaitingForApprovalScreen: View {
     @State private var showPortraitControls = false
     @State private var ignoreFocusTapUntil = Date.distantPast
     @State private var isControllerToolRailExpanded = false
+    @State private var zoomGestureBaseLevel: Double?
+    @State private var zoomWheelDragStartLevel: Double?
+    @State private var lastZoomHapticMark: Double?
+    @State private var lastLiveZoomPublishDate = Date.distantPast
+    @State private var pendingLiveZoomLevel: Double?
+    @State private var isLiveZoomPublishInFlight = false
+    @State private var ignoreRoomZoomUntil = Date.distantPast
 
     var body: some View {
         ZStack {
             previewSurface
                 .ignoresSafeArea()
+                .simultaneousGesture(controllerZoomGesture)
 
             VStack {
                 controllerTopBar
@@ -58,6 +67,11 @@ struct WaitingForApprovalScreen: View {
             .padding(.vertical, 12)
 
             if room?.controllerApproved == true {
+                if showZoomBar {
+                    controllerZoomWheelOverlay
+                        .transition(.scale(scale: 0.90, anchor: .bottom).combined(with: .opacity))
+                }
+
                 HStack {
                     Spacer(minLength: 0)
                     controllerToolRail
@@ -122,6 +136,25 @@ struct WaitingForApprovalScreen: View {
                     sourcePoint: layout.sourcePoint(for: localPoint),
                     displayPoint: layout.displayPoint(for: localPoint)
                 )
+            }
+    }
+
+    private var controllerZoomGesture: some Gesture {
+        MagnificationGesture()
+            .onChanged { scale in
+                guard room?.controllerApproved == true else { return }
+                let baseLevel = zoomGestureBaseLevel ?? zoomLevel
+                zoomGestureBaseLevel = baseLevel
+                let nextLevel = clampedZoom(baseLevel * Double(scale))
+                guard abs(nextLevel - zoomLevel) >= 0.02 else { return }
+                zoomLevel = nextLevel
+                ignoreRoomZoomUntil = Date.now.addingTimeInterval(0.8)
+                publishZoomDebounced()
+            }
+            .onEnded { _ in
+                zoomGestureBaseLevel = nil
+                ignoreRoomZoomUntil = Date.now.addingTimeInterval(1.0)
+                publishControls()
             }
     }
 
@@ -356,11 +389,39 @@ struct WaitingForApprovalScreen: View {
             manualExposurePanel
         } else if showPortraitControls && cameraMode == "portrait" {
             portraitControlsPanel
-        } else if showZoomBar {
-            zoomStrip
         } else {
-            EmptyView()
+            bottomZoomControls
         }
+    }
+
+    private var bottomZoomControls: some View {
+        VStack(spacing: 8) {
+            if !showZoomBar {
+                zoomPresetStrip
+                    .transition(.opacity)
+            }
+        }
+        .animation(.spring(response: 0.24, dampingFraction: 0.86), value: showZoomBar)
+    }
+
+    private var controllerZoomWheelOverlay: some View {
+        GeometryReader { geometry in
+            let wheelWidth = min(geometry.size.width, 390)
+            let wheelHeight: CGFloat = 142
+            let bottomOffset = min(max(geometry.size.height * 0.24, 170), 230)
+
+            VStack {
+                Spacer()
+                bottomCurvedZoomWheel
+                    .frame(width: wheelWidth, height: wheelHeight)
+                    .offset(y: 24)
+                    .padding(.bottom, bottomOffset)
+            }
+            .frame(width: geometry.size.width, height: geometry.size.height)
+            .contentShape(Rectangle())
+            .gesture(curvedZoomWheelGesture(travel: 340))
+        }
+        .animation(.spring(response: 0.24, dampingFraction: 0.86), value: showZoomBar)
     }
 
     private var controllerModeStrip: some View {
@@ -439,34 +500,81 @@ struct WaitingForApprovalScreen: View {
     }
 
     private var zoomPresetStrip: some View {
-        HStack(spacing: 10) {
-            ForEach(commonZoomOptions, id: \.self) { option in
+        HStack(spacing: 12) {
+            ForEach(zoomChipOptions, id: \.self) { option in
                 let isSelected = abs(zoomLevel - option) < 0.08
                 Button {
-                    zoomLevel = option
-                    publishControls()
+                    if !isSelected {
+                        zoomLevel = clampedZoom(option)
+                        ignoreRoomZoomUntil = Date.now.addingTimeInterval(1.0)
+                        publishZoomImmediately()
+                    }
                 } label: {
-                    Text(String(format: option.truncatingRemainder(dividingBy: 1) == 0 ? "%.0fx" : "%.1fx", option))
-                        .font(.caption.monospacedDigit().weight(isSelected ? .bold : .semibold))
-                        .foregroundStyle(isSelected ? .black : .white)
-                        .frame(minWidth: 42, minHeight: 34)
-                        .background(isSelected ? Color.white : Color.black.opacity(0.5), in: Capsule())
-                        .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 1))
+                    Text(zoomChipLabel(for: option, isSelected: isSelected))
+                        .font(.system(size: isSelected ? 18 : 17, weight: isSelected ? .black : .medium, design: .rounded).monospacedDigit())
+                        .foregroundStyle(isSelected ? Color.yellow : .white.opacity(0.92))
+                        .frame(width: 54, height: 54)
+                        .background {
+                            if isSelected {
+                                Circle()
+                                    .fill(Color.black.opacity(0.58))
+                                    .overlay(Circle().stroke(.white.opacity(0.10), lineWidth: 1))
+                            }
+                        }
+                        .contentShape(Circle())
                 }
                 .buttonStyle(.plain)
-                .simultaneousGesture(LongPressGesture(minimumDuration: 0.35).onEnded { _ in
-                    withAnimation(.easeInOut(duration: 0.18)) { showZoomBar = true }
+                .simultaneousGesture(LongPressGesture(minimumDuration: 0.16).onEnded { _ in
+                    if !isSelected {
+                        zoomLevel = clampedZoom(option)
+                        ignoreRoomZoomUntil = Date.now.addingTimeInterval(1.0)
+                        publishZoomImmediately()
+                    }
+                    openZoomWheel()
                 })
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(Color.black.opacity(0.36), in: Capsule())
+        .padding(.horizontal, 4)
+        .padding(.vertical, 2)
     }
 
     private var commonZoomOptions: [Double] {
-        let maximumZoom = room?.maxZoom ?? 8.0
-        return [1.0, 2.0, 3.0, 5.0].filter { $0 <= max(maximumZoom, 1.0) }
+        let options = [0.5, 1.0, 2.0, 3.0]
+        return options.filter { $0 >= minimumZoom && $0 <= maximumZoom }
+    }
+
+    private var zoomChipOptions: [Double] {
+        let roundedCurrentZoom = (zoomLevel * 10).rounded() / 10
+        var options = commonZoomOptions
+        if !options.contains(where: { abs($0 - roundedCurrentZoom) < 0.08 }) {
+            options.append(clampedZoom(roundedCurrentZoom))
+        }
+        return Array(Set(options.map { ($0 * 10).rounded() / 10 })).sorted()
+    }
+
+    private func zoomChipLabel(for option: Double, isSelected: Bool) -> String {
+        if isSelected {
+            if option.truncatingRemainder(dividingBy: 1) == 0 {
+                return String(format: "%.0fx", option)
+            }
+            return String(format: "%.1fx", option)
+        }
+        if option.truncatingRemainder(dividingBy: 1) == 0 {
+            return String(format: "%.0f", option)
+        }
+        return String(format: "%.1f", option)
+    }
+
+    private var minimumZoom: Double {
+        max(0.5, room?.minZoom ?? 0.5)
+    }
+
+    private var maximumZoom: Double {
+        max(minimumZoom, room?.maxZoom ?? 8.0)
+    }
+
+    private func clampedZoom(_ value: Double) -> Double {
+        min(maximumZoom, max(minimumZoom, value))
     }
 
     private var manualExposurePanel: some View {
@@ -722,19 +830,309 @@ struct WaitingForApprovalScreen: View {
     }
 
     private var zoomStrip: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "minus.magnifyingglass")
-            Slider(value: $zoomLevel, in: 1.0...8.0, step: 0.1)
-                .onChange(of: zoomLevel) { _ in publishZoomDebounced() }
-            Text(String(format: "%.1fx", zoomLevel))
-                .font(.caption.monospacedDigit())
-                .frame(width: 44, alignment: .trailing)
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
+                Image(systemName: "minus.magnifyingglass")
+                    .font(.system(size: 12, weight: .bold))
+                    .frame(width: 28, height: 28)
+                    .background(Color.white.opacity(0.10), in: Circle())
+
+                zoomWheel
+
+                Text(String(format: "%.1fx", zoomLevel))
+                    .font(.caption.monospacedDigit().weight(.bold))
+                    .frame(width: 48, alignment: .trailing)
+            }
+
+            zoomPresetStrip
         }
         .foregroundStyle(.white)
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
-        .background(Color.black.opacity(0.52), in: Capsule())
-        .overlay(Capsule().stroke(.white.opacity(0.18), lineWidth: 1))
+        .frame(maxWidth: 330)
+        .background(Color.black.opacity(0.52), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).stroke(.white.opacity(0.16), lineWidth: 1))
+    }
+
+    private var bottomCurvedZoomWheel: some View {
+        GeometryReader { geometry in
+            let size = geometry.size
+            let center = CGPoint(x: size.width / 2, y: size.height + 86)
+            let radius = min(size.width * 0.62, size.height * 1.62)
+            let tickCount = 101
+            let selectedFraction = zoomWheelFraction(for: zoomLevel)
+            let startDegrees = 210.0
+            let sweepDegrees = 120.0
+            let centerDegrees = 270.0
+            let scaleOffset = centerDegrees - (startDegrees + sweepDegrees * selectedFraction)
+
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.black.opacity(0.76), Color.black.opacity(0.34)],
+                            startPoint: .bottom,
+                            endPoint: .top
+                        )
+                    )
+                    .frame(width: (radius + 22) * 2, height: (radius + 22) * 2)
+                    .position(center)
+
+                ForEach(0..<tickCount, id: \.self) { index in
+                    let fraction = Double(index) / Double(tickCount - 1)
+                    let angle = Angle.degrees(startDegrees + (sweepDegrees * fraction) + scaleOffset)
+                    let distanceFromCenter = abs(angle.degrees - centerDegrees)
+                    let isMajorTick = index % 16 == 0
+                    let isCenterTick = distanceFromCenter < 1.2
+                    let tickLength: CGFloat = isCenterTick ? 0 : (isMajorTick ? 16 : 7)
+
+                    Capsule()
+                        .fill(Color.white.opacity(isMajorTick ? 0.68 : 0.34))
+                        .frame(width: 0.75, height: tickLength)
+                        .rotationEffect(angle + .degrees(90))
+                        .position(arcPoint(center: center, radius: radius, angle: angle))
+                }
+
+                ForEach(zoomWheelLabels, id: \.value) { mark in
+                    let angle = Angle.degrees(startDegrees + (sweepDegrees * mark.fraction) + scaleOffset)
+                    VStack(spacing: 2) {
+                        Text(mark.label)
+                            .font(.system(size: 19, weight: .bold, design: .rounded).monospacedDigit())
+                        if mark.value < zoomLevel - 0.08 || mark.value > zoomLevel + 0.08 {
+                            Text(focalLengthLabel(for: mark.value))
+                                .font(.system(size: 11, weight: .medium, design: .rounded).monospacedDigit())
+                        }
+                    }
+                    .foregroundStyle(mark.isSelected ? Color.yellow : Color.white.opacity(mark.isSelected ? 1.0 : 0.86))
+                    .rotationEffect(angle - .degrees(270))
+                    .position(arcPoint(center: center, radius: radius - 40, angle: angle))
+                }
+
+                VStack(spacing: 5) {
+                    Image(systemName: "triangle.fill")
+                        .font(.system(size: 10, weight: .bold))
+                        .rotationEffect(.degrees(180))
+                        .foregroundStyle(.yellow)
+                    Capsule()
+                        .fill(Color.yellow)
+                        .frame(width: 3, height: 20)
+                    Text(zoomValueLabel(for: zoomLevel))
+                        .font(.system(size: 18, weight: .black, design: .rounded).monospacedDigit())
+                        .foregroundStyle(.yellow)
+                    Text(focalLengthLabel(for: zoomLevel).uppercased())
+                        .font(.system(size: 12, weight: .bold, design: .rounded).monospacedDigit())
+                        .foregroundStyle(.yellow.opacity(0.92))
+                }
+                .position(x: size.width / 2, y: 58)
+            }
+            .contentShape(Rectangle())
+            .gesture(curvedZoomWheelGesture(travel: 340))
+        }
+        .accessibilityLabel("Zoom wheel")
+        .accessibilityValue(String(format: "%.1fx", zoomLevel))
+    }
+
+    private var zoomWheel: some View {
+        GeometryReader { geometry in
+            let tickCount = 39
+            let centerIndex = tickCount / 2
+
+            ZStack {
+                HStack(spacing: 5) {
+                    ForEach(0..<tickCount, id: \.self) { index in
+                        let distance = abs(index - centerIndex)
+                        Capsule()
+                            .fill(distance == 0 ? Color.yellow : Color.white.opacity(distance % 5 == 0 ? 0.70 : 0.36))
+                            .frame(width: distance == 0 ? 3 : 2, height: zoomTickHeight(distance: distance))
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .center)
+
+                VStack(spacing: 2) {
+                    Text(String(format: "%.1f", zoomLevel))
+                        .font(.system(size: 13, weight: .black, design: .rounded).monospacedDigit())
+                        .foregroundStyle(.yellow)
+                    Text("x")
+                        .font(.system(size: 8, weight: .black, design: .rounded))
+                        .foregroundStyle(.yellow.opacity(0.86))
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(Color.black.opacity(0.72), in: Capsule())
+                .overlay(Capsule().stroke(Color.yellow.opacity(0.28), lineWidth: 1))
+            }
+            .contentShape(Rectangle())
+            .gesture(zoomWheelGesture(width: geometry.size.width))
+        }
+        .frame(height: 44)
+        .accessibilityLabel("Zoom wheel")
+    }
+
+    private func zoomTickHeight(distance: Int) -> CGFloat {
+        if distance == 0 {
+            return 34
+        }
+        if distance % 5 == 0 {
+            return 24
+        }
+        return 14
+    }
+
+    private var zoomFraction: Double {
+        let range = maximumZoom - minimumZoom
+        guard range > 0 else { return 0 }
+        return 1 - ((clampedZoom(zoomLevel) - minimumZoom) / range)
+    }
+
+    private var zoomWheelLabels: [(value: Double, label: String, fraction: Double, isSelected: Bool)] {
+        zoomWheelDisplayOptions.map { value in
+            let fraction = zoomWheelFraction(for: value)
+            let label = zoomWheelMarkLabel(for: value)
+            return (value, label, fraction, abs(zoomLevel - value) < 0.08)
+        }
+    }
+
+    private var zoomWheelDisplayOptions: [Double] {
+        var options = [0.5, 1.0, 2.0, 3.0].filter { $0 >= minimumZoom && $0 <= maximumZoom }
+        if maximumZoom > 3.5 {
+            options.append(maximumZoom)
+        } else if options.isEmpty {
+            options = [minimumZoom, maximumZoom].filter { $0 >= minimumZoom && $0 <= maximumZoom }
+        }
+        return Array(Set(options.map { ($0 * 10).rounded() / 10 })).sorted()
+    }
+
+    private var zoomWheelMinimumDisplayZoom: Double {
+        minimumZoom
+    }
+
+    private var zoomWheelMaximumDisplayZoom: Double {
+        maximumZoom
+    }
+
+    private func zoomWheelFraction(for value: Double) -> Double {
+        let lower = max(0.1, zoomWheelMinimumDisplayZoom)
+        let upper = max(lower, zoomWheelMaximumDisplayZoom)
+        guard upper > lower else { return 0.5 }
+        let clampedValue = min(upper, max(lower, value))
+        return log(clampedValue / lower) / log(upper / lower)
+    }
+
+    private func zoomLevel(forWheelFraction fraction: Double) -> Double {
+        let lower = max(0.1, zoomWheelMinimumDisplayZoom)
+        let upper = max(lower, zoomWheelMaximumDisplayZoom)
+        guard upper > lower else { return lower }
+        let clampedFraction = min(1.0, max(0.0, fraction))
+        return clampedZoom(lower * pow(upper / lower, clampedFraction))
+    }
+
+    private func focalLengthLabel(for zoom: Double) -> String {
+        "\(Int((26 * zoom).rounded()))MM"
+    }
+
+    private func zoomWheelMarkLabel(for value: Double) -> String {
+        if value.truncatingRemainder(dividingBy: 1) == 0 {
+            return String(format: "%.0f", value)
+        }
+        return String(format: "%.1f", value)
+    }
+
+    private func zoomValueLabel(for value: Double) -> String {
+        if value.truncatingRemainder(dividingBy: 1) == 0 {
+            return String(format: "%.0fx", value)
+        }
+        return String(format: "%.1fx", value)
+    }
+
+    private func arcPoint(center: CGPoint, radius: CGFloat, angle: Angle) -> CGPoint {
+        let radians = CGFloat(angle.radians)
+        return CGPoint(
+            x: center.x + cos(radians) * radius,
+            y: center.y + sin(radians) * radius
+        )
+    }
+
+    private func openZoomWheel() {
+        zoomWheelDragStartLevel = zoomLevel
+        lastZoomHapticMark = nearestZoomHapticMark(to: zoomLevel)
+        withAnimation(.spring(response: 0.24, dampingFraction: 0.86)) {
+            showManualExposure = false
+            showPortraitControls = false
+            showZoomBar = true
+        }
+    }
+
+    private func closeZoomWheel() {
+        zoomWheelDragStartLevel = nil
+        zoomLevel = (zoomLevel * 10).rounded() / 10
+        ignoreRoomZoomUntil = Date.now.addingTimeInterval(1.0)
+        zoomPublishTask?.cancel()
+        zoomPublishTask = nil
+        pendingLiveZoomLevel = zoomLevel
+        if !isLiveZoomPublishInFlight {
+            startLiveZoomPublish()
+        }
+        withAnimation(.easeOut(duration: 0.20)) {
+            showZoomBar = false
+        }
+    }
+
+    private func updateZoomFromWheelDrag(_ verticalTranslation: CGFloat, travel: CGFloat) {
+        let startLevel = zoomWheelDragStartLevel ?? zoomLevel
+        zoomWheelDragStartLevel = startLevel
+        let normalizedDelta = -Double(verticalTranslation / max(travel, 1))
+        let startFraction = zoomWheelFraction(for: startLevel)
+        let nextFraction = min(1.0, max(0.0, startFraction + normalizedDelta * 0.58))
+        let nextLevel = zoomLevel(forWheelFraction: nextFraction)
+        guard abs(nextLevel - zoomLevel) >= 0.002 else { return }
+        var transaction = Transaction()
+        transaction.animation = nil
+        withTransaction(transaction) {
+            zoomLevel = nextLevel
+        }
+        ignoreRoomZoomUntil = Date.now.addingTimeInterval(0.8)
+        triggerZoomHapticIfNeeded(for: nextLevel)
+        publishZoomDebounced()
+    }
+
+    private func nearestZoomHapticMark(to value: Double) -> Double? {
+        zoomWheelDisplayOptions.min { abs($0 - value) < abs($1 - value) }
+    }
+
+    private func triggerZoomHapticIfNeeded(for value: Double) {
+        guard let mark = nearestZoomHapticMark(to: value), abs(mark - value) < 0.025 else { return }
+        guard lastZoomHapticMark != mark else { return }
+        lastZoomHapticMark = mark
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    }
+
+    private func zoomWheelGesture(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                let startLevel = zoomWheelDragStartLevel ?? zoomLevel
+                zoomWheelDragStartLevel = startLevel
+                let normalizedDelta = -Double(value.translation.width / max(width, 1))
+                let zoomRange = max(maximumZoom - minimumZoom, 1)
+                let nextLevel = clampedZoom(startLevel + normalizedDelta * zoomRange)
+                guard abs(nextLevel - zoomLevel) >= 0.02 else { return }
+                zoomLevel = nextLevel
+                publishZoomDebounced()
+            }
+            .onEnded { _ in
+                zoomWheelDragStartLevel = nil
+                zoomLevel = (zoomLevel * 10).rounded() / 10
+                publishControls()
+            }
+    }
+
+    private func curvedZoomWheelGesture(travel: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                updateZoomFromWheelDrag(value.translation.height, travel: travel)
+            }
+            .onEnded { _ in
+                closeZoomWheel()
+            }
     }
 
     private var shutterButton: some View {
@@ -818,7 +1216,9 @@ struct WaitingForApprovalScreen: View {
                     controllerPreviewLensFacing = nextRoom.lensFacing
                     controllerPreviewSwitching = false
                 }
-                zoomLevel = nextRoom.zoomLevel
+                if !showZoomBar && zoomWheelDragStartLevel == nil && Date.now >= ignoreRoomZoomUntil {
+                    zoomLevel = nextRoom.zoomLevel
+                }
                 flashMode = nextRoom.flashMode.safeCameraFlashMode
                 cameraMode = nextRoom.cameraMode
                 syncAspectRatioModeFromRoom(nextRoom.aspectRatioMode)
@@ -936,14 +1336,74 @@ struct WaitingForApprovalScreen: View {
     }
 
     private func publishZoomDebounced() {
+        if showZoomBar {
+            publishZoomLiveThrottled()
+            return
+        }
         zoomPublishTask?.cancel()
         zoomPublishTask = Task {
-            try? await Task.sleep(for: .milliseconds(250))
+            try? await Task.sleep(for: .milliseconds(140))
             guard !Task.isCancelled else { return }
             do {
-                try await services.roomRepository.updateControls(roomCode: roomCode, lensFacing: lensFacing, zoomLevel: zoomLevel, flashMode: flashMode)
+                try await services.roomRepository.updateZoomLevel(roomCode: roomCode, zoomLevel: zoomLevel)
             } catch {
                 await MainActor.run { errorMessage = error.localizedDescription }
+            }
+        }
+    }
+
+    private func publishZoomImmediately() {
+        zoomPublishTask?.cancel()
+        zoomPublishTask = nil
+        pendingLiveZoomLevel = zoomLevel
+        if !isLiveZoomPublishInFlight {
+            startLiveZoomPublish()
+        }
+    }
+
+    private func publishZoomLiveThrottled() {
+        let now = Date()
+        let minimumInterval: TimeInterval = 0.075
+        let elapsed = now.timeIntervalSince(lastLiveZoomPublishDate)
+        pendingLiveZoomLevel = zoomLevel
+
+        guard !isLiveZoomPublishInFlight else { return }
+
+        if elapsed >= minimumInterval {
+            startLiveZoomPublish()
+            return
+        }
+
+        guard zoomPublishTask == nil else { return }
+        let delay = max(0, minimumInterval - elapsed)
+        zoomPublishTask = Task {
+            try? await Task.sleep(for: .milliseconds(Int(delay * 1000)))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                zoomPublishTask = nil
+                startLiveZoomPublish()
+            }
+        }
+    }
+
+    private func startLiveZoomPublish() {
+        guard !isLiveZoomPublishInFlight else { return }
+        let levelToPublish = pendingLiveZoomLevel ?? zoomLevel
+        pendingLiveZoomLevel = nil
+        lastLiveZoomPublishDate = Date()
+        isLiveZoomPublishInFlight = true
+
+        Task {
+            do {
+                try await services.roomRepository.updateZoomLevel(roomCode: roomCode, zoomLevel: levelToPublish)
+            } catch {
+                await MainActor.run { errorMessage = error.localizedDescription }
+            }
+            await MainActor.run {
+                isLiveZoomPublishInFlight = false
+                if pendingLiveZoomLevel != nil {
+                    publishZoomLiveThrottled()
+                }
             }
         }
     }
@@ -1333,9 +1793,13 @@ private struct ControllerPreviewLayout {
         } else {
             size = CGSize(width: containerSize.width, height: containerSize.width / targetAspect)
         }
+        let isPortraitContainer = containerSize.height > containerSize.width
+        let topInset = isPortraitContainer ? min(max(containerSize.height * 0.14, 88), 132) : (containerSize.height - size.height) / 2.0
+        let centeredY = (containerSize.height - size.height) / 2.0
+        let yOrigin = isPortraitContainer ? min(topInset, max(centeredY, 0)) : centeredY
         return CGRect(
             x: (containerSize.width - size.width) / 2.0,
-            y: (containerSize.height - size.height) / 2.0,
+            y: max(0, yOrigin),
             width: size.width,
             height: size.height
         )

@@ -231,7 +231,7 @@ struct RoomDocument: Codable, Equatable, Sendable {
             captureRequestType: RoomSchema.defaultCaptureRequestType,
             lensFacing: .back,
             zoomLevel: 1.0,
-            minZoom: 1.0,
+            minZoom: 0.5,
             maxZoom: 8.0,
             flashEnabled: false,
             flashMode: RoomSchema.defaultFlashMode,

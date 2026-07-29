@@ -85,7 +85,7 @@ actor LocalRoomRepository: RoomRepository {
         let safeFlashMode = Self.safeFlashMode(flashMode)
         try update(roomCode: roomCode) { room in
             room.lensFacing = lensFacing
-            room.zoomLevel = max(1.0, min(8.0, zoomLevel))
+            room.zoomLevel = max(0.5, min(8.0, zoomLevel))
             room.flashEnabled = safeFlashMode != "off"
             room.flashMode = safeFlashMode
         }
@@ -97,13 +97,13 @@ actor LocalRoomRepository: RoomRepository {
 
     func updateZoomLevel(roomCode: String, zoomLevel: Double) async throws {
         try update(roomCode: roomCode) { room in
-            room.zoomLevel = max(room.minZoom, min(room.maxZoom, zoomLevel))
+            room.zoomLevel = max(0.5, min(room.maxZoom, zoomLevel))
         }
     }
 
     func updateZoomRange(roomCode: String, minZoom: Double, maxZoom: Double) async throws {
         try update(roomCode: roomCode) { room in
-            room.minZoom = max(1.0, minZoom)
+            room.minZoom = max(0.5, minZoom)
             room.maxZoom = max(room.minZoom, maxZoom)
             room.zoomLevel = max(room.minZoom, min(room.maxZoom, room.zoomLevel))
         }
@@ -446,7 +446,7 @@ actor FirestoreRoomRepository: RoomRepository {
         let safeFlashMode = Self.safeFlashMode(flashMode)
         try await update(roomCode: roomCode, values: [
             "lensFacing": lensFacing.rawValue,
-            "zoomLevel": max(1.0, min(8.0, zoomLevel)),
+            "zoomLevel": max(0.5, min(8.0, zoomLevel)),
             "flashEnabled": safeFlashMode != "off",
             "flashMode": safeFlashMode
         ])
@@ -457,11 +457,11 @@ actor FirestoreRoomRepository: RoomRepository {
     }
 
     func updateZoomLevel(roomCode: String, zoomLevel: Double) async throws {
-        try await update(roomCode: roomCode, values: ["zoomLevel": max(1.0, min(8.0, zoomLevel))])
+        try await update(roomCode: roomCode, values: ["zoomLevel": max(0.5, min(8.0, zoomLevel))])
     }
 
     func updateZoomRange(roomCode: String, minZoom: Double, maxZoom: Double) async throws {
-        let safeMinZoom = max(1.0, minZoom)
+        let safeMinZoom = max(0.5, minZoom)
         try await update(roomCode: roomCode, values: [
             "minZoom": safeMinZoom,
             "maxZoom": max(safeMinZoom, maxZoom)
@@ -900,7 +900,7 @@ actor FirestoreRoomRepository: RoomRepository {
             captureRequestType: captureRequest?.type ?? "photo",
             lensFacing: LensFacing(rawValue: data["lensFacing"]?.stringValue ?? "back") ?? .back,
             zoomLevel: data["zoomLevel"]?.numberValue ?? 1.0,
-            minZoom: data["minZoom"]?.numberValue ?? 1.0,
+            minZoom: data["minZoom"]?.numberValue ?? 0.5,
             maxZoom: data["maxZoom"]?.numberValue ?? 8.0,
             flashEnabled: data["flashEnabled"]?.booleanValue ?? (flashMode == "on"),
             flashMode: flashMode,
@@ -1244,7 +1244,7 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
         let safeFlashMode = Self.safeFlashMode(flashMode)
         try await update(roomCode: roomCode, values: [
             "lensFacing": lensFacing.rawValue,
-            "zoomLevel": max(1.0, min(8.0, zoomLevel)),
+            "zoomLevel": max(0.5, min(8.0, zoomLevel)),
             "flashEnabled": safeFlashMode != "off",
             "flashMode": safeFlashMode
         ])
@@ -1255,11 +1255,11 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
     }
 
     func updateZoomLevel(roomCode: String, zoomLevel: Double) async throws {
-        try await update(roomCode: roomCode, values: ["zoomLevel": max(1.0, min(8.0, zoomLevel))])
+        try await update(roomCode: roomCode, values: ["zoomLevel": max(0.5, min(8.0, zoomLevel))])
     }
 
     func updateZoomRange(roomCode: String, minZoom: Double, maxZoom: Double) async throws {
-        let safeMinZoom = max(1.0, minZoom)
+        let safeMinZoom = max(0.5, minZoom)
         try await update(roomCode: roomCode, values: [
             "minZoom": safeMinZoom,
             "maxZoom": max(safeMinZoom, maxZoom)
@@ -1558,7 +1558,7 @@ final class FirebaseSDKRoomRepository: @unchecked Sendable, RoomRepository {
             captureRequestType: captureRequest?.type ?? "photo",
             lensFacing: LensFacing(rawValue: data["lensFacing"] as? String ?? "back") ?? .back,
             zoomLevel: Self.doubleValue(data["zoomLevel"], default: 1.0),
-            minZoom: Self.doubleValue(data["minZoom"], default: 1.0),
+            minZoom: Self.doubleValue(data["minZoom"], default: 0.5),
             maxZoom: Self.doubleValue(data["maxZoom"], default: 8.0),
             flashEnabled: data["flashEnabled"] as? Bool ?? (flashMode == "on"),
             flashMode: flashMode,
