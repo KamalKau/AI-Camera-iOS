@@ -1429,10 +1429,10 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         guard isThrottlingLocalStreamForRecording else { return profile }
         return WebRtcStreamProfile(
             width: min(profile.width, 640),
-            height: min(profile.height, 360),
-            fps: min(profile.fps, 15),
-            minBitrate: min(profile.minBitrate, 450_000),
-            maxBitrate: min(profile.maxBitrate, 1_200_000)
+            height: min(profile.height, 480),
+            fps: min(profile.fps, 24),
+            minBitrate: min(profile.minBitrate, 600_000),
+            maxBitrate: min(profile.maxBitrate, 1_600_000)
         )
     }
 
@@ -1442,6 +1442,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         if let videoSender {
             configureVideoSender(videoSender)
         }
+        adaptLocalVideoSource()
     }
 
     private func makeOffer(on peerConnection: RTCPeerConnection) async throws -> RTCSessionDescription {
