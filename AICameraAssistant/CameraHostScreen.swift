@@ -1,4 +1,6 @@
 import SwiftUI
+import UIKit
+import Vision
 
 struct CameraHostScreen: View {
     let roomCode: String
@@ -22,6 +24,8 @@ struct CameraHostScreen: View {
     @State private var hostPreviewLensTarget: LensFacing?
     @State private var hostPreviewSwitching = false
     @State private var hostPreviewSwitchTask: Task<Void, Never>?
+    @State private var hostFaceDetectionTask: Task<Void, Never>?
+    @State private var isFaceDetectionAcquired = false
     @State private var isHostToolRailExpanded = false
 
     var body: some View {
@@ -80,6 +84,7 @@ struct CameraHostScreen: View {
         .onDisappear {
             hostPreviewLensTask?.cancel()
             hostPreviewSwitchTask?.cancel()
+            hostFaceDetectionTask?.cancel()
             Task {
                 await services.webRtcSession.finishHostVideoRecordingBeforeTeardown()
                 camera.stop()
@@ -120,6 +125,16 @@ struct CameraHostScreen: View {
             .overlay {
                 if room?.gridEnabled == true {
                     CameraGridOverlay()
+                }
+            }
+            .overlay {
+                if let room {
+                    HostFaceOverlay(
+                        state: room.faceDetectionOverlayState,
+                        sourceWidth: room.previewWidth,
+                        sourceHeight: room.previewHeight,
+                        isMirrored: false
+                    )
                 }
             }
             .overlay {
@@ -388,6 +403,7 @@ struct CameraHostScreen: View {
                 syncToolbarExpandedFromRoom(nextRoom.toolbarExpanded)
                 exposureValue = Double(nextRoom.exposureIndex) / 8.0
                 prewarmHostStreamIfNeeded(for: nextRoom)
+                updateFaceDetectionPublishing(for: nextRoom)
                 handleFocusRequest(nextRoom)
                 handleCaptureRequest(nextRoom.captureRequest)
             }
@@ -580,6 +596,9 @@ struct CameraHostScreen: View {
 
     private func returnToStart() async {
         await services.webRtcSession.finishHostVideoRecordingBeforeTeardown()
+        hostFaceDetectionTask?.cancel()
+        hostFaceDetectionTask = nil
+        isFaceDetectionAcquired = false
         services.webRtcSession.stop()
         camera.stop()
         path = NavigationPath()
@@ -596,6 +615,105 @@ struct CameraHostScreen: View {
         Task {
             try? await services.roomCameraControlUpdater.updateZoomLevel(roomCode: roomCode, zoomLevel: appliedZoomLevel)
         }
+    }
+
+    private func updateFaceDetectionPublishing(for room: RoomDocument) {
+        let shouldPublish = room.controllerApproved && services.webRtcSession.state != .idle && services.webRtcSession.localVideoTrack != nil
+        guard shouldPublish else {
+            hostFaceDetectionTask?.cancel()
+            hostFaceDetectionTask = nil
+            clearPublishedFaceDetectionState()
+            return
+        }
+        guard hostFaceDetectionTask == nil else { return }
+
+        hostFaceDetectionTask = Task { @MainActor in
+            while !Task.isCancelled {
+                await publishFaceDetectionState()
+                try? await Task.sleep(for: .milliseconds(700))
+            }
+        }
+    }
+
+    private func publishFaceDetectionState() async {
+        guard let image = await captureHostPreviewSnapshot() else {
+            clearPublishedFaceDetectionState()
+            return
+        }
+        let boxes = await Self.detectFaceBounds(in: image)
+        guard !boxes.isEmpty else {
+            isFaceDetectionAcquired = false
+            clearPublishedFaceDetectionState()
+            return
+        }
+        guard !isFaceDetectionAcquired else { return }
+        isFaceDetectionAcquired = true
+
+        let primaryBox = boxes.first ?? .zero
+        let timestamp = RoomSchema.timestampId()
+        let overlayState = FaceDetectionOverlayState(
+            detected: true,
+            count: boxes.count,
+            timestamp: timestamp,
+            primaryBox: primaryBox,
+            boxes: boxes
+        )
+        try? await services.roomCameraControlUpdater.updateFaceDetectionOverlay(roomCode: roomCode, state: overlayState)
+
+        let portraitState = PortraitSubjectState(
+            status: "Subject locked",
+            faceBounds: primaryBox
+        )
+        try? await services.roomCameraControlUpdater.updatePortraitSubjectState(roomCode: roomCode, state: portraitState)
+    }
+
+    private func clearPublishedFaceDetectionState() {
+        isFaceDetectionAcquired = false
+        Task {
+            try? await services.roomCameraControlUpdater.updateFaceDetectionOverlay(roomCode: roomCode, state: .empty)
+            try? await services.roomCameraControlUpdater.updatePortraitSubjectState(roomCode: roomCode, state: .finding)
+        }
+    }
+
+    private func captureHostPreviewSnapshot() async -> UIImage? {
+        await withCheckedContinuation { continuation in
+            services.webRtcSession.captureHostPhoto(aspectRatio: .full, wantsPortraitMatte: false) { image, _, _, _, _, _ in
+                continuation.resume(returning: image)
+            }
+        }
+    }
+
+    private nonisolated static func detectFaceBounds(in image: UIImage) async -> [NormalizedFaceBounds] {
+        await Task.detached(priority: .utility) {
+            guard let cgImage = image.cgImage else { return [] }
+            let request = VNDetectFaceRectanglesRequest()
+            let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up, options: [:])
+            do {
+                try handler.perform([request])
+                return (request.results ?? [])
+                    .map { observation in
+                        expandedFaceBounds(for: observation.boundingBox)
+                    }
+                    .filter(\.isValid)
+            } catch {
+                return []
+            }
+        }.value
+    }
+
+    private nonisolated static func expandedFaceBounds(for visionBox: CGRect) -> NormalizedFaceBounds {
+        let width = Double(visionBox.width)
+        let height = Double(visionBox.height)
+        let horizontalPadding = width * 0.10
+        let topPadding = height * 0.28
+        let bottomPadding = height * 0.10
+
+        return NormalizedFaceBounds(
+            left: max(0.0, Double(visionBox.minX) - horizontalPadding),
+            top: max(0.0, Double(1.0 - visionBox.maxY) - topPadding),
+            right: min(1.0, Double(visionBox.maxX) + horizontalPadding),
+            bottom: min(1.0, Double(1.0 - visionBox.minY) + bottomPadding)
+        )
     }
 
     private func updateGridEnabled(_ enabled: Bool) {
@@ -671,6 +789,79 @@ struct CameraSwitchingOverlay: View {
         .allowsHitTesting(false)
     }
 }
+
+private struct HostFaceOverlay: View {
+    let state: FaceDetectionOverlayState
+    let sourceWidth: Int
+    let sourceHeight: Int
+    let isMirrored: Bool
+
+    private static let staleDetectionIntervalMillis: Int64 = 1_200
+
+    private func boxes(at date: Date) -> [NormalizedFaceBounds] {
+        guard state.detected, isFresh(at: date) else { return [] }
+        let validBoxes = state.boxes.filter(\.isValid)
+        if !validBoxes.isEmpty { return validBoxes }
+        return state.primaryBox.isValid ? [state.primaryBox] : []
+    }
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
+            GeometryReader { geometry in
+                let videoDrawRect = videoDrawRect(in: geometry.size)
+                let visibleBoxes = boxes(at: timeline.date)
+                ZStack(alignment: .topLeading) {
+                    ForEach(Array(visibleBoxes.enumerated()), id: \.offset) { _, box in
+                        let rect = displayRect(for: box, videoDrawRect: videoDrawRect, canvasSize: geometry.size)
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(.yellow, lineWidth: 1.5)
+                            .frame(width: rect.width, height: rect.height)
+                            .position(x: rect.midX, y: rect.midY)
+                    }
+                }
+                .clipped()
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func isFresh(at date: Date) -> Bool {
+        guard state.timestamp > 0 else { return false }
+        let nowMillis = Int64(date.timeIntervalSince1970 * 1000)
+        return nowMillis - state.timestamp <= Self.staleDetectionIntervalMillis
+    }
+
+    private func videoDrawRect(in canvasSize: CGSize) -> CGRect {
+        guard canvasSize.width > 0, canvasSize.height > 0 else { return .zero }
+        let sourceAspect = CGFloat(sourceWidth > 0 && sourceHeight > 0 ? Double(sourceWidth) / Double(sourceHeight) : 16.0 / 9.0)
+        let canvasAspect = canvasSize.width / max(canvasSize.height, 1)
+        let size: CGSize
+        if canvasAspect > sourceAspect {
+            size = CGSize(width: canvasSize.width, height: canvasSize.width / sourceAspect)
+        } else {
+            size = CGSize(width: canvasSize.height * sourceAspect, height: canvasSize.height)
+        }
+        return CGRect(
+            x: (canvasSize.width - size.width) / 2.0,
+            y: (canvasSize.height - size.height) / 2.0,
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    private func displayRect(for box: NormalizedFaceBounds, videoDrawRect: CGRect, canvasSize: CGSize) -> CGRect {
+        let left = CGFloat(isMirrored ? 1.0 - box.right : box.left)
+        let right = CGFloat(isMirrored ? 1.0 - box.left : box.right)
+        let rect = CGRect(
+            x: videoDrawRect.minX + left * videoDrawRect.width,
+            y: videoDrawRect.minY + CGFloat(box.top) * videoDrawRect.height,
+            width: max(0, (right - left) * videoDrawRect.width),
+            height: max(0, CGFloat(box.bottom - box.top) * videoDrawRect.height)
+        )
+        return rect.intersection(CGRect(origin: .zero, size: canvasSize))
+    }
+}
+
 private struct HostRoomStatusCard: View {
     let roomCode: String
     let statusText: String

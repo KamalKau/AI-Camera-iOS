@@ -131,10 +131,11 @@ struct WaitingForApprovalScreen: View {
                 guard room?.controllerApproved == true, Date.now >= ignoreFocusTapUntil else { return }
                 guard abs(value.translation.width) < 8, abs(value.translation.height) < 8 else { return }
                 let localPoint = value.location
-                guard layout.localBounds.contains(localPoint) else { return }
+                guard layout.videoDrawRectInVisibleRect.contains(localPoint) else { return }
+                let sourcePoint = layout.sourcePoint(for: localPoint)
                 sendFocusRequest(
-                    sourcePoint: layout.sourcePoint(for: localPoint),
-                    displayPoint: layout.displayPoint(for: localPoint)
+                    sourcePoint: sourcePoint,
+                    displayPoint: sourcePoint
                 )
             }
     }
@@ -179,26 +180,39 @@ struct WaitingForApprovalScreen: View {
             #endif
 
             if room?.gridEnabled == true {
-                CameraGridOverlay()
+                ControllerVideoRectOverlay(videoDrawRect: layout.videoDrawRectInVisibleRect) {
+                    CameraGridOverlay()
+                }
+            }
+
+            if let room, cameraMode == "portrait" {
+                ControllerPortraitSubjectOverlay(
+                    state: room.portraitSubjectState,
+                    faceDetectionState: room.faceDetectionOverlayState,
+                    videoDrawRect: layout.videoDrawRectInVisibleRect,
+                    isMirrored: false
+                )
             }
 
             if let room {
                 ControllerFaceOverlay(
                     state: room.faceDetectionOverlayState,
                     videoDrawRect: layout.videoDrawRectInVisibleRect,
-                    isMirrored: controllerPreviewLensFacing == .front
+                    isMirrored: false
                 )
             }
 
             if let focusReticlePoint {
-                FocusExposureOverlay(
-                    point: focusReticlePoint,
-                    exposureValue: $exposureValue,
-                    isInteractive: true,
-                    onExposureChanged: publishExposureDebounced,
-                    onExposureCommitted: publishExposureDebounced,
-                    onInteractionChanged: updateFocusTapSuppression
-                )
+                ControllerVideoRectOverlay(videoDrawRect: layout.videoDrawRectInVisibleRect) {
+                    FocusExposureOverlay(
+                        point: focusReticlePoint,
+                        exposureValue: $exposureValue,
+                        isInteractive: true,
+                        onExposureChanged: publishExposureDebounced,
+                        onExposureCommitted: publishExposureDebounced,
+                        onInteractionChanged: updateFocusTapSuppression
+                    )
+                }
             }
 
             if let message = previewConnectionOverlayText {
@@ -1837,13 +1851,75 @@ private struct ControllerPreviewLayout {
         )
     }
 
-    func displayPoint(for localPoint: CGPoint) -> CGPoint {
-        let bounds = localBounds
-        guard bounds.width > 0, bounds.height > 0 else { return .zero }
-        return CGPoint(
-            x: min(1.0, max(0.0, localPoint.x / bounds.width)),
-            y: min(1.0, max(0.0, localPoint.y / bounds.height))
+}
+
+private struct ControllerVideoRectOverlay<Content: View>: View {
+    let videoDrawRect: CGRect
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        content()
+            .frame(width: videoDrawRect.width, height: videoDrawRect.height)
+            .clipped()
+            .position(x: videoDrawRect.midX, y: videoDrawRect.midY)
+            .allowsHitTesting(false)
+    }
+}
+
+private struct ControllerPortraitSubjectOverlay: View {
+    let state: PortraitSubjectState
+    let faceDetectionState: FaceDetectionOverlayState
+    let videoDrawRect: CGRect
+    let isMirrored: Bool
+
+    private static let staleDetectionIntervalMillis: Int64 = 1_200
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
+            GeometryReader { geometry in
+                let isVisible = state.faceBounds.isValid && faceDetectionState.detected && isFresh(at: timeline.date)
+                let rect = displayRect(for: state.faceBounds, canvasSize: geometry.size)
+                ZStack(alignment: .topLeading) {
+                    if isVisible {
+                        RoundedRectangle(cornerRadius: 12)
+                            .stroke(.white.opacity(0.9), lineWidth: 1.5)
+                            .frame(width: rect.width, height: rect.height)
+                            .position(x: rect.midX, y: rect.midY)
+
+                        Text(state.status)
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 5)
+                            .background(Color.black.opacity(0.46), in: Capsule())
+                            .position(x: videoDrawRect.midX, y: min(videoDrawRect.maxY - 22, max(videoDrawRect.minY + 22, rect.maxY + 18)))
+                    }
+                }
+                .clipped()
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private func isFresh(at date: Date) -> Bool {
+        guard faceDetectionState.timestamp > 0 else { return false }
+        let nowMillis = Int64(date.timeIntervalSince1970 * 1000)
+        return nowMillis - faceDetectionState.timestamp <= Self.staleDetectionIntervalMillis
+    }
+
+    private func displayRect(for box: NormalizedFaceBounds, canvasSize: CGSize) -> CGRect {
+        guard box.isValid else {
+            return CGRect(x: videoDrawRect.midX - 1, y: videoDrawRect.midY - 1, width: 2, height: 2)
+        }
+        let left = CGFloat(isMirrored ? 1.0 - box.right : box.left)
+        let right = CGFloat(isMirrored ? 1.0 - box.left : box.right)
+        let rect = CGRect(
+            x: videoDrawRect.minX + left * videoDrawRect.width,
+            y: videoDrawRect.minY + CGFloat(box.top) * videoDrawRect.height,
+            width: max(0, (right - left) * videoDrawRect.width),
+            height: max(0, CGFloat(box.bottom - box.top) * videoDrawRect.height)
         )
+        return rect.intersection(CGRect(origin: .zero, size: canvasSize))
     }
 }
 
@@ -1852,26 +1928,38 @@ private struct ControllerFaceOverlay: View {
     let videoDrawRect: CGRect
     let isMirrored: Bool
 
-    private var boxes: [NormalizedFaceBounds] {
+    private static let staleDetectionIntervalMillis: Int64 = 1_200
+
+    private func boxes(at date: Date) -> [NormalizedFaceBounds] {
+        guard state.detected, isFresh(at: date) else { return [] }
         let validBoxes = state.boxes.filter(\.isValid)
         if !validBoxes.isEmpty { return validBoxes }
         return state.primaryBox.isValid ? [state.primaryBox] : []
     }
 
     var body: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .topLeading) {
-                ForEach(Array(boxes.enumerated()), id: \.offset) { _, box in
-                    let rect = displayRect(for: box, canvasSize: geometry.size)
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(.yellow, lineWidth: 1.5)
-                        .frame(width: rect.width, height: rect.height)
-                        .position(x: rect.midX, y: rect.midY)
+        TimelineView(.periodic(from: .now, by: 0.25)) { timeline in
+            GeometryReader { geometry in
+                let visibleBoxes = boxes(at: timeline.date)
+                ZStack(alignment: .topLeading) {
+                    ForEach(Array(visibleBoxes.enumerated()), id: \.offset) { _, box in
+                        let rect = displayRect(for: box, canvasSize: geometry.size)
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(.yellow, lineWidth: 1.5)
+                            .frame(width: rect.width, height: rect.height)
+                            .position(x: rect.midX, y: rect.midY)
+                    }
                 }
+                .clipped()
             }
-            .clipped()
         }
         .allowsHitTesting(false)
+    }
+
+    private func isFresh(at date: Date) -> Bool {
+        guard state.timestamp > 0 else { return false }
+        let nowMillis = Int64(date.timeIntervalSince1970 * 1000)
+        return nowMillis - state.timestamp <= Self.staleDetectionIntervalMillis
     }
 
     private func displayRect(for box: NormalizedFaceBounds, canvasSize: CGSize) -> CGRect {
