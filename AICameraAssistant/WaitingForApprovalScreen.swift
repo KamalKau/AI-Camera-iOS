@@ -216,7 +216,9 @@ struct WaitingForApprovalScreen: View {
             }
 
             if let message = previewConnectionOverlayText {
-                ControllerPreviewConnectionOverlay(message: message)
+                ControllerVideoRectOverlay(videoDrawRect: layout.videoDrawRectInVisibleRect) {
+                    ControllerPreviewConnectionOverlay(message: message)
+                }
             }
 
             if controllerPreviewSwitching {
@@ -1786,71 +1788,6 @@ private struct ControllerRailButton: View {
         }
         .buttonStyle(.plain)
     }
-}
-
-private struct ControllerPreviewLayout {
-    let containerSize: CGSize
-    let aspectRatioMode: String
-    let sourceWidth: Int
-    let sourceHeight: Int
-
-    var visibleRect: CGRect {
-        guard containerSize.width > 0, containerSize.height > 0 else { return .zero }
-        guard aspectRatioMode != "full" else {
-            return CGRect(origin: .zero, size: containerSize)
-        }
-        let targetAspect = aspectRatioMode.cameraPreviewAspectRatio
-        let containerAspect = containerSize.width / max(containerSize.height, 1)
-        let size: CGSize
-        if containerAspect > targetAspect {
-            size = CGSize(width: containerSize.height * targetAspect, height: containerSize.height)
-        } else {
-            size = CGSize(width: containerSize.width, height: containerSize.width / targetAspect)
-        }
-        let isPortraitContainer = containerSize.height > containerSize.width
-        let topInset = isPortraitContainer ? min(max(containerSize.height * 0.14, 88), 132) : (containerSize.height - size.height) / 2.0
-        let centeredY = (containerSize.height - size.height) / 2.0
-        let yOrigin = isPortraitContainer ? min(topInset, max(centeredY, 0)) : centeredY
-        return CGRect(
-            x: (containerSize.width - size.width) / 2.0,
-            y: max(0, yOrigin),
-            width: size.width,
-            height: size.height
-        )
-    }
-
-    var localBounds: CGRect {
-        CGRect(origin: .zero, size: visibleRect.size)
-    }
-
-    var videoDrawRectInVisibleRect: CGRect {
-        let bounds = localBounds
-        guard bounds.width > 0, bounds.height > 0 else { return .zero }
-        let sourceAspect = CGFloat(sourceWidth > 0 && sourceHeight > 0 ? Double(sourceWidth) / Double(sourceHeight) : 16.0 / 9.0)
-        let boundsAspect = bounds.width / max(bounds.height, 1)
-        let size: CGSize
-        if boundsAspect > sourceAspect {
-            size = CGSize(width: bounds.width, height: bounds.width / sourceAspect)
-        } else {
-            size = CGSize(width: bounds.height * sourceAspect, height: bounds.height)
-        }
-        return CGRect(
-            x: (bounds.width - size.width) / 2.0,
-            y: (bounds.height - size.height) / 2.0,
-            width: size.width,
-            height: size.height
-        )
-    }
-
-    func sourcePoint(for localPoint: CGPoint) -> CGPoint {
-        let videoRect = videoDrawRectInVisibleRect
-        guard videoRect.width > 0, videoRect.height > 0 else { return .zero }
-        return CGPoint(
-            x: min(1.0, max(0.0, (localPoint.x - videoRect.minX) / videoRect.width)),
-            y: min(1.0, max(0.0, (localPoint.y - videoRect.minY) / videoRect.height))
-        )
-    }
-
 }
 
 private struct ControllerVideoRectOverlay<Content: View>: View {
