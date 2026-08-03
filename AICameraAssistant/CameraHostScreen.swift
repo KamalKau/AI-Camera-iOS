@@ -28,6 +28,9 @@ struct CameraHostScreen: View {
     @State private var isFaceDetectionAcquired = false
     @State private var isHostToolRailExpanded = false
     @State private var isHostBoomerangArmed = false
+    @State private var isHostBoomerangCaptureAnimating = false
+    @State private var hostBoomerangCaptureProgress = 0.0
+    @State private var hostBoomerangProgressTask: Task<Void, Never>?
     @State private var boomerangStatusMessage: String?
 
     var body: some View {
@@ -90,6 +93,7 @@ struct CameraHostScreen: View {
             hostPreviewLensTask?.cancel()
             hostPreviewSwitchTask?.cancel()
             hostFaceDetectionTask?.cancel()
+            hostBoomerangProgressTask?.cancel()
             Task {
                 await services.webRtcSession.finishHostVideoRecordingBeforeTeardown()
                 camera.stop()
@@ -396,9 +400,9 @@ struct CameraHostScreen: View {
                         .stroke(hostShutterRingColor.opacity(0.96), lineWidth: 5)
                         .frame(width: 86, height: 86)
 
-                    if case .capturing = camera.boomerangCaptureManager.state {
+                    if isHostBoomerangCaptureAnimating || camera.boomerangCaptureManager.state == .capturing {
                         Circle()
-                            .trim(from: 0, to: camera.boomerangCaptureManager.progress)
+                            .trim(from: 0, to: max(hostBoomerangCaptureProgress, camera.boomerangCaptureManager.progress))
                             .stroke(.yellow, style: StrokeStyle(lineWidth: 6, lineCap: .round))
                             .frame(width: 86, height: 86)
                             .rotationEffect(.degrees(-90))
@@ -424,6 +428,7 @@ struct CameraHostScreen: View {
                 }
                 .animation(.easeOut(duration: 0.16), value: isHostBoomerangArmed)
                 .animation(.easeOut(duration: 0.16), value: camera.boomerangCaptureManager.progress)
+                .animation(.linear(duration: 0.08), value: hostBoomerangCaptureProgress)
 
                 Text(hostShutterLabel)
                     .font(.system(size: 11, weight: .black))
@@ -437,6 +442,7 @@ struct CameraHostScreen: View {
     }
 
     private var hostShutterRingColor: Color {
+        if isHostBoomerangCaptureAnimating { return .yellow }
         if case .capturing = camera.boomerangCaptureManager.state { return .yellow }
         if isHostBoomerangArmed { return .yellow }
         if (room?.cameraMode ?? "photo") == "video" || services.webRtcSession.isHostVideoRecording { return .red }
@@ -445,6 +451,7 @@ struct CameraHostScreen: View {
     }
 
     private var hostShutterLabel: String {
+        if isHostBoomerangCaptureAnimating { return "BOOM" }
         if case .capturing = camera.boomerangCaptureManager.state { return "BOOM" }
         if isHostBoomerangArmed { return "BOOM \(BoomerangCaptureDefaults.durationLabel)" }
         if (room?.cameraMode ?? "photo") == "video" { return services.webRtcSession.isHostVideoRecording ? "STOP" : "VIDEO" }
@@ -688,6 +695,7 @@ struct CameraHostScreen: View {
         guard !camera.boomerangCaptureManager.isBusy else { return false }
         guard !services.webRtcSession.isHostVideoRecording else { return false }
         boomerangStatusMessage = nil
+        startHostBoomerangShutterProgress()
         services.webRtcSession.stop()
         let started = await camera.prepareForBoomerangCapture(
             lensFacing: room?.lensFacing ?? camera.lensFacing,
@@ -695,6 +703,7 @@ struct CameraHostScreen: View {
             flashMode: room?.flashMode ?? camera.flashMode
         )
         guard started else {
+            stopHostBoomerangShutterProgress()
             boomerangStatusMessage = "Boomerang failed: camera did not start."
             return false
         }
@@ -719,6 +728,29 @@ struct CameraHostScreen: View {
         guard room?.status == .connected else { return }
         await camera.stopAndWait()
         await services.webRtcSession.startHost(roomCode: roomCode, repository: services.roomSignalingRepository)
+    }
+
+    private func startHostBoomerangShutterProgress() {
+        hostBoomerangProgressTask?.cancel()
+        isHostBoomerangCaptureAnimating = true
+        hostBoomerangCaptureProgress = 0
+
+        hostBoomerangProgressTask = Task { @MainActor in
+            let steps = 20
+            for step in 1...steps {
+                try? await Task.sleep(for: .milliseconds(BoomerangCaptureDefaults.captureDurationMilliseconds / steps))
+                guard !Task.isCancelled else { return }
+                hostBoomerangCaptureProgress = Double(step) / Double(steps)
+            }
+            stopHostBoomerangShutterProgress()
+        }
+    }
+
+    private func stopHostBoomerangShutterProgress() {
+        hostBoomerangProgressTask?.cancel()
+        hostBoomerangProgressTask = nil
+        isHostBoomerangCaptureAnimating = false
+        hostBoomerangCaptureProgress = 0
     }
 
     private func resetCaptureRequest() {
