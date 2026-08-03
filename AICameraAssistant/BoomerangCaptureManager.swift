@@ -1,6 +1,5 @@
 @preconcurrency import AVFoundation
 import Combine
-import Photos
 import SwiftUI
 import UIKit
 
@@ -19,25 +18,17 @@ final class BoomerangCaptureManager: NSObject, ObservableObject, AVCaptureVideoD
     @Published private(set) var errorMessage: String?
     @Published private(set) var saveMessage: String?
 
-    private final class CapturedFrame {
-        let pixelBuffer: CVPixelBuffer
-        let relativeTime: CMTime
-
-        init(pixelBuffer: CVPixelBuffer, relativeTime: CMTime) {
-            self.pixelBuffer = pixelBuffer
-            self.relativeTime = relativeTime
-        }
-    }
-
     private let captureQueue = DispatchQueue(label: "com.aicameraassistant.boomerang.capture", qos: .userInitiated)
     private let processingQueue = DispatchQueue(label: "boomerang.processing.queue", qos: .userInitiated)
     private let videoOutput = AVCaptureVideoDataOutput()
     private let fileManager = FileManager.default
+    private let videoExporter: BoomerangVideoExporting
+    private let photoLibrarySaver: BoomerangPhotoLibrarySaving
 
     private var isInstalled = false
     private var isCapturingFrames = false
     private var isFinishingCapture = false
-    private var capturedFrames: [CapturedFrame] = []
+    private var capturedFrames: [BoomerangCapturedFrame] = []
     private var firstPresentationTime: CMTime?
     private var captureTimer: DispatchSourceTimer?
     private var currentOutputURL: URL?
@@ -51,6 +42,15 @@ final class BoomerangCaptureManager: NSObject, ObservableObject, AVCaptureVideoD
         default:
             return false
         }
+    }
+
+    init(
+        videoExporter: BoomerangVideoExporting = DefaultBoomerangVideoExporter(),
+        photoLibrarySaver: BoomerangPhotoLibrarySaving = DefaultBoomerangPhotoLibrarySaver()
+    ) {
+        self.videoExporter = videoExporter
+        self.photoLibrarySaver = photoLibrarySaver
+        super.init()
     }
 
     func installVideoOutputIfNeeded(on session: AVCaptureSession, lensFacing: LensFacing) {
@@ -137,33 +137,7 @@ final class BoomerangCaptureManager: NSObject, ObservableObject, AVCaptureVideoD
 
     func saveToPhotos() async -> String {
         guard let outputURL else { return "No Boomerang is ready to save." }
-        return await saveToPhotos(outputURL)
-    }
-
-    private func saveToPhotos(_ url: URL) async -> String {
-        guard Bundle.main.object(forInfoDictionaryKey: "NSPhotoLibraryAddUsageDescription") != nil else {
-            return "Boomerang exported. Add Photos permission text to save to Camera Roll."
-        }
-
-        do {
-            try await ensurePhotoLibraryWriteAccess()
-            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                PHPhotoLibrary.shared().performChanges {
-                    PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
-                } completionHandler: { success, error in
-                    if let error {
-                        continuation.resume(throwing: error)
-                    } else if success {
-                        continuation.resume()
-                    } else {
-                        continuation.resume(throwing: CocoaError(.fileWriteUnknown))
-                    }
-                }
-            }
-            return "Boomerang saved to Photos."
-        } catch {
-            return "Boomerang save failed: \(error.localizedDescription)"
-        }
+        return await photoLibrarySaver.saveBoomerang(at: outputURL)
     }
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
@@ -182,7 +156,7 @@ final class BoomerangCaptureManager: NSObject, ObservableObject, AVCaptureVideoD
 
         let relativeTime = CMTimeSubtract(presentationTime, firstPresentationTime)
         let elapsed = max(0, CMTimeGetSeconds(relativeTime))
-        capturedFrames.append(CapturedFrame(pixelBuffer: pixelBuffer, relativeTime: relativeTime))
+        capturedFrames.append(BoomerangCapturedFrame(pixelBuffer: pixelBuffer, relativeTime: relativeTime))
 
         if capturedFrames.count == 1 || capturedFrames.count % 8 == 0 {
             debugLog("Captured frame count: \(capturedFrames.count)")
@@ -238,7 +212,7 @@ final class BoomerangCaptureManager: NSObject, ObservableObject, AVCaptureVideoD
         processingQueue.async { [weak self] in
             guard let self else { return }
             do {
-                let url = try self.exportBoomerang(frames: frames)
+                let url = try self.videoExporter.exportBoomerang(frames: frames)
                 self.captureQueue.async {
                     self.currentOutputURL = url
                     self.isFinishingCapture = false
@@ -268,120 +242,12 @@ final class BoomerangCaptureManager: NSObject, ObservableObject, AVCaptureVideoD
         }
     }
 
-    private func exportBoomerang(frames: [CapturedFrame]) throws -> URL {
-        guard frames.count >= BoomerangCaptureDefaults.minimumSourceFrames else {
-            throw BoomerangCaptureError.insufficientFrames
-        }
-
-        let sourceFrames = frames.count < BoomerangCaptureDefaults.normalizedSourceFrameCount
-            ? Self.normalizedFrames(from: frames, targetCount: BoomerangCaptureDefaults.normalizedSourceFrameCount)
-            : frames
-        let frameOrder = Self.forwardReverseFrameOrder(frameCount: sourceFrames.count, cycles: BoomerangCaptureDefaults.exportCycleCount)
-        guard !frameOrder.isEmpty else { throw BoomerangCaptureError.insufficientFrames }
-
-        let firstBuffer = sourceFrames[0].pixelBuffer
-        let width = CVPixelBufferGetWidth(firstBuffer)
-        let height = CVPixelBufferGetHeight(firstBuffer)
-        let outputURL = try makeOutputURL()
-        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
-        let settings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: width,
-            AVVideoHeightKey: height,
-            AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: max(width * height * 4, 2_000_000),
-                AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
-            ]
-        ]
-        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
-        input.expectsMediaDataInRealTime = false
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
-            assetWriterInput: input,
-            sourcePixelBufferAttributes: [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                kCVPixelBufferWidthKey as String: width,
-                kCVPixelBufferHeightKey as String: height
-            ]
-        )
-
-        guard writer.canAdd(input) else { throw BoomerangCaptureError.writerSetupFailed }
-        writer.add(input)
-        guard writer.startWriting() else { throw writer.error ?? BoomerangCaptureError.writerSetupFailed }
-        writer.startSession(atSourceTime: .zero)
-
-        let frameDuration = CMTime(value: 1, timescale: CMTimeScale(BoomerangCaptureDefaults.targetFrameRate))
-        var frameIndex = 0
-        for sourceIndex in frameOrder {
-            let readyDeadline = Date().addingTimeInterval(2.0)
-            while !input.isReadyForMoreMediaData {
-                if writer.status == .failed || writer.status == .cancelled {
-                    throw writer.error ?? BoomerangCaptureError.writerAppendFailed
-                }
-                if Date() >= readyDeadline {
-                    writer.cancelWriting()
-                    throw BoomerangCaptureError.writerTimedOut
-                }
-                Thread.sleep(forTimeInterval: 0.002)
-            }
-            let presentationTime = CMTimeMultiply(frameDuration, multiplier: Int32(frameIndex))
-            guard adaptor.append(sourceFrames[sourceIndex].pixelBuffer, withPresentationTime: presentationTime) else {
-                throw writer.error ?? BoomerangCaptureError.writerAppendFailed
-            }
-            frameIndex += 1
-        }
-
-        input.markAsFinished()
-        let finished = DispatchSemaphore(value: 0)
-        writer.finishWriting { finished.signal() }
-        guard finished.wait(timeout: .now() + 5.0) == .success else {
-            writer.cancelWriting()
-            try? fileManager.removeItem(at: outputURL)
-            throw BoomerangCaptureError.writerTimedOut
-        }
-
-        guard writer.status == .completed else {
-            try? fileManager.removeItem(at: outputURL)
-            throw writer.error ?? BoomerangCaptureError.writerFinishFailed
-        }
-        return outputURL
-    }
-
-    private static func normalizedFrames(from frames: [CapturedFrame], targetCount: Int) -> [CapturedFrame] {
-        guard !frames.isEmpty, targetCount > 0 else { return [] }
-        guard frames.count < targetCount else { return frames }
-        guard targetCount > 1, frames.count > 1 else {
-            return Array(repeating: frames[0], count: targetCount)
-        }
-
-        return (0..<targetCount).map { index in
-            let sourcePosition = Double(index) * Double(frames.count - 1) / Double(targetCount - 1)
-            let sourceIndex = min(frames.count - 1, max(0, Int(sourcePosition.rounded())))
-            return frames[sourceIndex]
-        }
-    }
-
     nonisolated static func forwardReverseFrameOrder(frameCount: Int, cycles: Int) -> [Int] {
-        guard frameCount >= 2, cycles > 0 else { return [] }
-        let forward = Array(0..<frameCount)
-        let reverse = frameCount > 2 ? Array(1..<(frameCount - 1)).reversed() : []
-        let cycle = forward + reverse
-        return Array(repeating: cycle, count: cycles).flatMap { $0 }
+        BoomerangFrameSequencer.forwardReverseFrameOrder(frameCount: frameCount, cycles: cycles)
     }
 
     nonisolated static func presentationTimes(frameCount: Int, frameRate: Int) -> [CMTime] {
-        guard frameCount > 0, frameRate > 0 else { return [] }
-        let duration = CMTime(value: 1, timescale: CMTimeScale(frameRate))
-        return (0..<frameCount).map { CMTimeMultiply(duration, multiplier: Int32($0)) }
-    }
-
-    private func makeOutputURL() throws -> URL {
-        let directory = fileManager.temporaryDirectory.appendingPathComponent("Boomerang", isDirectory: true)
-        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
-        let url = directory.appendingPathComponent("boomerang-\(UUID().uuidString).mp4")
-        if fileManager.fileExists(atPath: url.path) {
-            try fileManager.removeItem(at: url)
-        }
-        return url
+        BoomerangFrameSequencer.presentationTimes(frameCount: frameCount, frameRate: frameRate)
     }
 
     private func removeOutputFileIfNeeded() {
@@ -435,21 +301,6 @@ final class BoomerangCaptureManager: NSObject, ObservableObject, AVCaptureVideoD
         return copiedBuffer
     }
 
-    private func ensurePhotoLibraryWriteAccess() async throws {
-        let status = PHPhotoLibrary.authorizationStatus(for: .addOnly)
-        let authorized: Bool
-        switch status {
-        case .authorized, .limited:
-            authorized = true
-        case .notDetermined:
-            let requestedStatus = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-            authorized = requestedStatus == .authorized || requestedStatus == .limited
-        default:
-            authorized = false
-        }
-        guard authorized else { throw CocoaError(.userCancelled) }
-    }
-
     private func publishState(_ nextState: BoomerangState, progress nextProgress: Double? = nil) {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
@@ -478,7 +329,7 @@ final class BoomerangCaptureManager: NSObject, ObservableObject, AVCaptureVideoD
     private func autoSaveExportedBoomerang(at url: URL) {
         Task { [weak self] in
             guard let self else { return }
-            let message = await self.saveToPhotos(url)
+            let message = await self.photoLibrarySaver.saveBoomerang(at: url)
             await MainActor.run {
                 self.saveMessage = message
             }
@@ -493,29 +344,6 @@ final class BoomerangCaptureManager: NSObject, ObservableObject, AVCaptureVideoD
         #if DEBUG
         print("[Boomerang] \(message)")
         #endif
-    }
-}
-
-private enum BoomerangCaptureError: LocalizedError {
-    case insufficientFrames
-    case writerSetupFailed
-    case writerAppendFailed
-    case writerFinishFailed
-    case writerTimedOut
-
-    var errorDescription: String? {
-        switch self {
-        case .insufficientFrames:
-            return "Not enough video frames were captured. Please try again."
-        case .writerSetupFailed:
-            return "The video writer could not start."
-        case .writerAppendFailed:
-            return "A frame could not be written."
-        case .writerFinishFailed:
-            return "The video could not be finalized."
-        case .writerTimedOut:
-            return "The video took too long to create. Please try again."
-        }
     }
 }
 

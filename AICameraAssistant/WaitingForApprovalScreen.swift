@@ -462,18 +462,21 @@ struct WaitingForApprovalScreen: View {
     }
 
     private var controllerPrimaryControls: some View {
-        VStack(spacing: 12) {
-            controllerModeStrip
+        VStack(spacing: 10) {
             burstCountPill
+            shutterButton
 
-            HStack(alignment: .center, spacing: 28) {
-                controllerLeftActions
-                    .frame(width: 78)
+            ZStack {
+                controllerModeStrip
+                    .frame(maxWidth: .infinity, alignment: .center)
 
-                shutterButton
-
-                controllerRightActions
-                    .frame(width: 78)
+                HStack {
+                    if cameraMode == "video" {
+                        videoHdrButton
+                    }
+                    Spacer(minLength: 0)
+                    lensFlipButton(size: 54)
+                }
             }
             .frame(maxWidth: 340)
 
@@ -483,20 +486,6 @@ struct WaitingForApprovalScreen: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 12)
-    }
-
-    private var controllerLeftActions: some View {
-        VStack(spacing: 12) {
-            if cameraMode == "video" {
-                videoHdrButton
-            }
-        }
-    }
-
-    private var controllerRightActions: some View {
-        VStack(spacing: 12) {
-            lensFlipButton(size: 54)
-        }
     }
 
     @ViewBuilder

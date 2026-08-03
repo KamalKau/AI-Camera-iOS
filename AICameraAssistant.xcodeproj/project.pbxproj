@@ -14,6 +14,8 @@
 		FE3019962FC3C4DA00E6BEBB /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = FE3019952FC3C4DA00E6BEBB /* WebRTC */; };
 		FEE82D3D2FD8F1FC00B8CF03 /* PhotoSavingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEE82D3C2FD8F1FB00B8CF03 /* PhotoSavingService.swift */; };
 		FEE82D3F2FD8F23800B8CF03 /* CameraFlashMode.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEE82D3E2FD8F23800B8CF03 /* CameraFlashMode.swift */; };
+		FEF881ED302049EB006E3C64 /* BoomerangVideoExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEF881EC302049EB006E3C64 /* BoomerangVideoExporter.swift */; };
+		FEF881EF302049F6006E3C64 /* BoomerangPhotoLibrarySaver.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEF881EE302049F6006E3C64 /* BoomerangPhotoLibrarySaver.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -21,6 +23,8 @@
 		FE5B7D4F2FC2AE8C00105CEC /* AICameraAssistant.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AICameraAssistant.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		FEE82D3C2FD8F1FB00B8CF03 /* PhotoSavingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoSavingService.swift; sourceTree = "<group>"; };
 		FEE82D3E2FD8F23800B8CF03 /* CameraFlashMode.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraFlashMode.swift; sourceTree = "<group>"; };
+		FEF881EC302049EB006E3C64 /* BoomerangVideoExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoomerangVideoExporter.swift; sourceTree = "<group>"; };
+		FEF881EE302049F6006E3C64 /* BoomerangPhotoLibrarySaver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BoomerangPhotoLibrarySaver.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -94,6 +98,8 @@
 				FEE82D3C2FD8F1FB00B8CF03 /* PhotoSavingService.swift */,
 				FEE82D3E2FD8F23800B8CF03 /* CameraFlashMode.swift */,
 				FE00498B2FE38A410071E0C5 /* StreamHealthMonitor.swift */,
+				FEF881EC302049EB006E3C64 /* BoomerangVideoExporter.swift */,
+				FEF881EE302049F6006E3C64 /* BoomerangPhotoLibrarySaver.swift */,
 			);
 			sourceTree = "<group>";
 		};
@@ -187,8 +193,10 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FEF881ED302049EB006E3C64 /* BoomerangVideoExporter.swift in Sources */,
 				FEE82D3D2FD8F1FC00B8CF03 /* PhotoSavingService.swift in Sources */,
 				FE00498C2FE38A410071E0C5 /* StreamHealthMonitor.swift in Sources */,
+				FEF881EF302049F6006E3C64 /* BoomerangPhotoLibrarySaver.swift in Sources */,
 				FEE82D3F2FD8F23800B8CF03 /* CameraFlashMode.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
