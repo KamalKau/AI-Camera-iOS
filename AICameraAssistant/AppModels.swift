@@ -26,6 +26,23 @@ enum StreamQualityMode: String, Codable, Sendable {
     case quality
 }
 
+enum BoomerangCaptureDefaults {
+    nonisolated static let captureDurationSeconds = 1.0
+    nonisolated static let maxCaptureDurationSeconds = 2.0
+    nonisolated static let safetyTimeoutSeconds = 2.2
+    nonisolated static let captureDurationMilliseconds = Int(captureDurationSeconds * 1000)
+    nonisolated static let targetFrameRate = 30
+    nonisolated static let exportCycleCount = 3
+    nonisolated static let preferredMinimumSourceFrames = 8
+    nonisolated static let minimumSourceFrames = 1
+    nonisolated static let normalizedSourceFrameCount = 30
+    nonisolated static let maxSourceFrames = 60
+
+    nonisolated static var durationLabel: String {
+        String(format: "%.0fs", captureDurationSeconds)
+    }
+}
+
 enum RoomSchema {
     nonisolated static let defaultAspectRatioMode = "full"
     nonisolated static let defaultCameraMode = "photo"

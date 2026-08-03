@@ -26,6 +26,7 @@ final class CameraController: NSObject, ObservableObject {
     var flashEnabled: Bool { flashMode != "off" }
 
     let session = AVCaptureSession()
+    let boomerangCaptureManager = BoomerangCaptureManager()
     private let sessionQueue = DispatchQueue(label: "camera.session.queue")
     private let photoOutput = AVCapturePhotoOutput()
     private let portraitPhotoProcessor = PortraitPhotoProcessor()
@@ -80,6 +81,25 @@ final class CameraController: NSObject, ObservableObject {
         self.zoomLevel = CameraBackDeviceSelection.effectiveZoomLevel(lensFacing: lensFacing, requestedZoomLevel: zoomLevel)
         self.flashMode = flashMode.safeCameraFlashMode
         return await configureAndStartForPhotoCapture()
+    }
+
+    func prepareForBoomerangCapture(lensFacing: LensFacing, zoomLevel: Double, flashMode: String) async -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            permissionState = .granted
+        case .notDetermined:
+            let granted = await AVCaptureDevice.requestAccess(for: .video)
+            permissionState = granted ? .granted : .denied
+            guard granted else { return false }
+        default:
+            permissionState = .denied
+            return false
+        }
+
+        self.lensFacing = lensFacing
+        self.zoomLevel = CameraBackDeviceSelection.effectiveZoomLevel(lensFacing: lensFacing, requestedZoomLevel: zoomLevel)
+        self.flashMode = flashMode.safeCameraFlashMode
+        return await configureAndStartForBoomerangCapture()
     }
 
     func stop() {
@@ -142,6 +162,14 @@ final class CameraController: NSObject, ObservableObject {
 
     func switchLens() {
         apply(lensFacing: lensFacing == .back ? .front : .back, zoomLevel: zoomLevel, flashMode: flashMode)
+    }
+
+    func startBoomerangCapture() {
+        boomerangCaptureManager.startCapture(lensFacing: lensFacing)
+    }
+
+    func cancelBoomerangCapture() {
+        boomerangCaptureManager.cancel()
     }
 
     private func prewarmPhotoStorageIfNeeded() {
@@ -313,6 +341,7 @@ final class CameraController: NSObject, ObservableObject {
                         session.addOutput(photoOutput)
                     }
                 }
+                self.boomerangCaptureManager.installVideoOutputIfNeeded(on: session, lensFacing: selectedLens)
                 session.commitConfiguration()
                 Self.preparePhotoOutput(photoOutput) {
                     Task { @MainActor in self.isPhotoOutputPrepared = true }
@@ -362,13 +391,68 @@ final class CameraController: NSObject, ObservableObject {
                             session.addOutput(photoOutput)
                         }
                     }
-                        session.commitConfiguration()
+                    self.boomerangCaptureManager.installVideoOutputIfNeeded(on: session, lensFacing: selectedLens)
+                    session.commitConfiguration()
                     Self.preparePhotoOutput(photoOutput) {
                         Task { @MainActor in self.isPhotoOutputPrepared = true }
                     }
                     self.applyZoomOnQueue(selectedZoom, device: device)
                     self.applyExposureOnQueue(0, device: device)
                     if !session.isRunning { session.startRunning() }
+                    let running = session.isRunning
+                    Task { @MainActor in self.isRunning = running }
+                    continuation.resume(returning: running)
+                } catch {
+                    session.commitConfiguration()
+                    Task { @MainActor in self.permissionState = .denied }
+                    continuation.resume(returning: false)
+                }
+            }
+        }
+    }
+
+    private func configureAndStartForBoomerangCapture() async -> Bool {
+        isPhotoOutputPrepared = false
+        let selectedLens = lensFacing
+        let selectedZoom = zoomLevel
+        let session = session
+        let photoOutput = photoOutput
+
+        return await withCheckedContinuation { continuation in
+            sessionQueue.async { [weak self] in
+                guard let self else {
+                    continuation.resume(returning: false)
+                    return
+                }
+
+                if session.isRunning { session.stopRunning() }
+                session.beginConfiguration()
+                if session.canSetSessionPreset(.hd1280x720) {
+                    session.sessionPreset = .hd1280x720
+                } else if session.canSetSessionPreset(.high) {
+                    session.sessionPreset = .high
+                }
+                if let currentInput = self.currentInput { session.removeInput(currentInput) }
+
+                do {
+                    let device = try Self.makeDevice(for: selectedLens, zoomLevel: selectedZoom)
+                    let input = try AVCaptureDeviceInput(device: device)
+                    guard session.canAddInput(input) else {
+                        session.commitConfiguration()
+                        continuation.resume(returning: false)
+                        return
+                    }
+                    session.addInput(input)
+                    self.currentInput = input
+                    if session.outputs.contains(photoOutput) {
+                        session.removeOutput(photoOutput)
+                    }
+                    self.boomerangCaptureManager.installVideoOutputIfNeeded(on: session, lensFacing: selectedLens)
+                    session.commitConfiguration()
+                    self.applyBoomerangFrameRateOnQueue(device)
+                    self.applyZoomOnQueue(selectedZoom, device: device)
+                    self.applyExposureOnQueue(0, device: device)
+                    session.startRunning()
                     let running = session.isRunning
                     Task { @MainActor in self.isRunning = running }
                     continuation.resume(returning: running)
@@ -390,6 +474,23 @@ final class CameraController: NSObject, ObservableObject {
 
     private func applyZoomOnQueue(_ zoomLevel: Double, device: AVCaptureDevice) {
         CameraDeviceControls.applyZoom(to: device, zoomLevel: zoomLevel)
+    }
+
+    private func applyBoomerangFrameRateOnQueue(_ device: AVCaptureDevice) {
+        let frameDuration = CMTime(value: 1, timescale: CMTimeScale(BoomerangCaptureDefaults.targetFrameRate))
+        do {
+            try device.lockForConfiguration()
+            if device.activeFormat.videoSupportedFrameRateRanges.contains(where: { range in
+                range.minFrameRate <= Double(BoomerangCaptureDefaults.targetFrameRate)
+                    && Double(BoomerangCaptureDefaults.targetFrameRate) <= range.maxFrameRate
+            }) {
+                device.activeVideoMinFrameDuration = frameDuration
+                device.activeVideoMaxFrameDuration = frameDuration
+            }
+            device.unlockForConfiguration()
+        } catch {
+            return
+        }
     }
 
     private func applyExposureOnQueue(_ exposureIndex: Int, device: AVCaptureDevice) {

@@ -27,11 +27,16 @@ struct CameraHostScreen: View {
     @State private var hostFaceDetectionTask: Task<Void, Never>?
     @State private var isFaceDetectionAcquired = false
     @State private var isHostToolRailExpanded = false
+    @State private var isHostBoomerangArmed = false
+    @State private var boomerangStatusMessage: String?
 
     var body: some View {
         GeometryReader { geometry in
             ZStack {
                 hostPreview
+
+                boomerangHostOverlay
+                    .zIndex(18)
 
                 VStack(spacing: 0) {
                     hostTopOverlay
@@ -150,6 +155,51 @@ struct CameraHostScreen: View {
         .ignoresSafeArea()
     }
 
+    @ViewBuilder
+    private var boomerangHostOverlay: some View {
+        switch camera.boomerangCaptureManager.state {
+        case .capturing:
+            EmptyView()
+
+        case .processing:
+            EmptyView()
+
+        case .previewing:
+            BoomerangPreviewScreen(
+                manager: camera.boomerangCaptureManager,
+                onRetake: {
+                    boomerangStatusMessage = nil
+                    camera.boomerangCaptureManager.retake()
+                }
+            )
+
+        case .failed(let message):
+            VStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundStyle(.yellow)
+                Text(message)
+                    .font(.system(size: 13, weight: .semibold))
+                    .multilineTextAlignment(.center)
+                    .foregroundStyle(.white)
+                Button("Retake") {
+                    camera.boomerangCaptureManager.retake()
+                }
+                .font(.system(size: 14, weight: .black))
+                .foregroundStyle(.black)
+                .padding(.horizontal, 18)
+                .frame(height: 40)
+                .background(Color.white, in: Capsule())
+            }
+            .padding(18)
+            .background(Color.black.opacity(0.62), in: RoundedRectangle(cornerRadius: 8))
+            .padding(.horizontal, 28)
+
+        case .idle:
+            EmptyView()
+        }
+    }
+
     private var hostTopOverlay: some View {
         VStack(spacing: 10) {
             ZStack(alignment: .top) {
@@ -192,7 +242,10 @@ struct CameraHostScreen: View {
             }
 
             if isHostToolRailExpanded {
-                HostRailButton(systemName: "circle.grid.cross", label: "Boom", isSelected: false) {}
+                HostRailButton(systemName: "infinity", label: "Boom", isSelected: isHostBoomerangArmed) {
+                    armHostBoomerangShutter()
+                }
+                .disabled(camera.boomerangCaptureManager.isBusy || services.webRtcSession.isHostVideoRecording)
 
                 HostRailButton(systemName: "sparkles", label: "Scene", isSelected: room?.sceneDetectionEnabled == true) {
                     updateSceneDetectionEnabled(!(room?.sceneDetectionEnabled ?? false))
@@ -233,6 +286,14 @@ struct CameraHostScreen: View {
 
             if let photoSaveMessage = camera.photoSaveMessage {
                 HostInfoChip(text: photoSaveMessage, systemName: "checkmark.circle")
+                    .multilineTextAlignment(.center)
+            }
+
+            if let boomerangSaveMessage = camera.boomerangCaptureManager.saveMessage {
+                HostInfoChip(text: boomerangSaveMessage, systemName: "infinity")
+                    .multilineTextAlignment(.center)
+            } else if let boomerangStatusMessage {
+                HostInfoChip(text: boomerangStatusMessage, systemName: "infinity")
                     .multilineTextAlignment(.center)
             }
         }
@@ -299,8 +360,8 @@ struct CameraHostScreen: View {
 
     private var hostModeStrip: some View {
         HStack(spacing: 0) {
-            hostModeButton("video", label: "VIDEO")
             hostModeButton("photo", label: "PHOTO")
+            hostModeButton("video", label: "VIDEO")
             hostModeButton("portrait", label: "PORTRAIT")
         }
         .padding(4)
@@ -309,18 +370,86 @@ struct CameraHostScreen: View {
     }
 
     private var hostCaptureControls: some View {
-        ZStack {
-            hostModeStrip
-                .frame(maxWidth: .infinity, alignment: .center)
+        VStack(spacing: 10) {
+            hostShutterButton
 
-            HStack {
-                Spacer(minLength: 0)
-                hostFlipCameraButton
+            ZStack {
+                hostModeStrip
+                    .frame(maxWidth: .infinity, alignment: .center)
+
+                HStack {
+                    Spacer(minLength: 0)
+                    hostFlipCameraButton
+                }
             }
+            .frame(maxWidth: 320)
         }
-        .frame(maxWidth: 320)
         .padding(.bottom, 10)
         .offset(y: 8)
+    }
+
+    private var hostShutterButton: some View {
+        Button { performHostCapture() } label: {
+            VStack(spacing: 6) {
+                ZStack {
+                    Circle()
+                        .stroke(hostShutterRingColor.opacity(0.96), lineWidth: 5)
+                        .frame(width: 86, height: 86)
+
+                    if case .capturing = camera.boomerangCaptureManager.state {
+                        Circle()
+                            .trim(from: 0, to: camera.boomerangCaptureManager.progress)
+                            .stroke(.yellow, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                            .frame(width: 86, height: 86)
+                            .rotationEffect(.degrees(-90))
+                        Circle()
+                            .fill(Color.yellow)
+                            .frame(width: 12, height: 12)
+                    } else if isHostBoomerangArmed {
+                        Circle()
+                            .fill(Color.yellow)
+                            .frame(width: 64, height: 64)
+                        Image(systemName: "infinity")
+                            .font(.system(size: 25, weight: .black))
+                            .foregroundStyle(.black)
+                    } else if (room?.cameraMode ?? "photo") == "video" {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 64, height: 64)
+                    } else {
+                        Circle()
+                            .fill(Color.white)
+                            .frame(width: 64, height: 64)
+                    }
+                }
+                .animation(.easeOut(duration: 0.16), value: isHostBoomerangArmed)
+                .animation(.easeOut(duration: 0.16), value: camera.boomerangCaptureManager.progress)
+
+                Text(hostShutterLabel)
+                    .font(.system(size: 11, weight: .black))
+                    .foregroundStyle(hostShutterRingColor)
+                    .frame(height: 13)
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(camera.boomerangCaptureManager.isBusy || (services.webRtcSession.isHostVideoRecording && isHostBoomerangArmed))
+        .accessibilityLabel(hostShutterLabel)
+    }
+
+    private var hostShutterRingColor: Color {
+        if case .capturing = camera.boomerangCaptureManager.state { return .yellow }
+        if isHostBoomerangArmed { return .yellow }
+        if (room?.cameraMode ?? "photo") == "video" || services.webRtcSession.isHostVideoRecording { return .red }
+        if (room?.cameraMode ?? "photo") == "portrait" { return Color(red: 0.78, green: 0.62, blue: 1.0) }
+        return .white.opacity(0.96)
+    }
+
+    private var hostShutterLabel: String {
+        if case .capturing = camera.boomerangCaptureManager.state { return "BOOM" }
+        if isHostBoomerangArmed { return "BOOM \(BoomerangCaptureDefaults.durationLabel)" }
+        if (room?.cameraMode ?? "photo") == "video" { return services.webRtcSession.isHostVideoRecording ? "STOP" : "VIDEO" }
+        if (room?.cameraMode ?? "photo") == "portrait" { return "PORTRAIT" }
+        return "PHOTO"
     }
 
     private var hostFlipCameraButton: some View {
@@ -413,6 +542,8 @@ struct CameraHostScreen: View {
     }
 
     private func switchHostLens() {
+        guard !camera.boomerangCaptureManager.isBusy else { return }
+        isHostBoomerangArmed = false
         hostPreviewSwitchTask?.cancel()
         hostPreviewSwitching = true
         camera.switchLens()
@@ -428,6 +559,16 @@ struct CameraHostScreen: View {
     }
 
     private func performHostCapture() {
+        if isHostBoomerangArmed {
+            isHostBoomerangArmed = false
+            Task {
+                guard await startHostBoomerangCapture() else { return }
+                await waitForBoomerangToFinishCaptureRequest()
+                await restartHostPreviewAfterBoomerang()
+            }
+            return
+        }
+
         if (room?.cameraMode ?? "photo") == "video" {
             if services.webRtcSession.isHostVideoRecording {
                 services.webRtcSession.stopHostVideoRecording()
@@ -456,6 +597,12 @@ struct CameraHostScreen: View {
         } else {
             camera.capturePhoto(aspectRatio: CameraAspectRatio(roomValue: aspectRatioMode)) { _ in }
         }
+    }
+
+    private func armHostBoomerangShutter() {
+        guard !camera.boomerangCaptureManager.isBusy, !services.webRtcSession.isHostVideoRecording else { return }
+        isHostBoomerangArmed.toggle()
+        boomerangStatusMessage = isHostBoomerangArmed ? "Boomerang ready" : nil
     }
 
     private func scheduleHostPreviewLensFacing(_ lensFacing: LensFacing) {
@@ -498,6 +645,8 @@ struct CameraHostScreen: View {
                 services.webRtcSession.stopHostVideoRecording()
                 resetCaptureRequest()
                 isHandlingRemoteCapture = false
+            case "boomerang":
+                await handleBoomerangCapture()
             default:
                 resetCaptureRequest()
                 if services.webRtcSession.state != .idle {
@@ -522,6 +671,54 @@ struct CameraHostScreen: View {
                 }
             }
         }
+    }
+
+    private func handleBoomerangCapture() async {
+        resetCaptureRequest()
+        guard await startHostBoomerangCapture() else {
+            isHandlingRemoteCapture = false
+            return
+        }
+        await waitForBoomerangToFinishCaptureRequest()
+        await restartHostPreviewAfterBoomerang()
+        isHandlingRemoteCapture = false
+    }
+
+    private func startHostBoomerangCapture() async -> Bool {
+        guard !camera.boomerangCaptureManager.isBusy else { return false }
+        guard !services.webRtcSession.isHostVideoRecording else { return false }
+        boomerangStatusMessage = nil
+        services.webRtcSession.stop()
+        let started = await camera.prepareForBoomerangCapture(
+            lensFacing: room?.lensFacing ?? camera.lensFacing,
+            zoomLevel: room?.zoomLevel ?? camera.zoomLevel,
+            flashMode: room?.flashMode ?? camera.flashMode
+        )
+        guard started else {
+            boomerangStatusMessage = "Boomerang failed: camera did not start."
+            return false
+        }
+        try? await Task.sleep(for: .milliseconds(500))
+        camera.startBoomerangCapture()
+        return true
+    }
+
+    private func waitForBoomerangToFinishCaptureRequest() async {
+        let startDeadline = Date().addingTimeInterval(2.0)
+        while !camera.boomerangCaptureManager.isBusy, Date() < startDeadline {
+            if case .failed = camera.boomerangCaptureManager.state { return }
+            try? await Task.sleep(for: .milliseconds(60))
+        }
+
+        while camera.boomerangCaptureManager.isBusy {
+            try? await Task.sleep(for: .milliseconds(120))
+        }
+    }
+
+    private func restartHostPreviewAfterBoomerang() async {
+        guard room?.status == .connected else { return }
+        await camera.stopAndWait()
+        await services.webRtcSession.startHost(roomCode: roomCode, repository: services.roomSignalingRepository)
     }
 
     private func resetCaptureRequest() {
@@ -725,6 +922,8 @@ struct CameraHostScreen: View {
     }
 
     private func updateCameraMode(_ mode: String) {
+        isHostBoomerangArmed = false
+        boomerangStatusMessage = nil
         Task { try? await services.roomCameraControlUpdater.updateCameraMode(roomCode: roomCode, cameraMode: mode) }
     }
 

@@ -27,6 +27,13 @@ struct WaitingForApprovalScreen: View {
     @State private var isSwitchingCameraDuringRecording = false
     @State private var captureFeedback: String?
     @State private var shutterFlashVisible = false
+    @State private var isBoomerangArmed = false
+    @State private var isBoomerangCaptureAnimating = false
+    @State private var boomerangCaptureProgress = 0.0
+    @State private var boomerangProgressTask: Task<Void, Never>?
+    @State private var suppressPreviewNetworkWarningUntil = Date.distantPast
+    @State private var burstCount = 0
+    @State private var burstResetTask: Task<Void, Never>?
     @State private var controllerPreviewLensFacing: LensFacing = .back
     @State private var controllerPreviewLensTask: Task<Void, Never>?
     @State private var controllerPreviewLensTarget: LensFacing?
@@ -96,6 +103,8 @@ struct WaitingForApprovalScreen: View {
             firstFrameRetryTask?.cancel()
             controllerPreviewLensTask?.cancel()
             controllerLensSwitchTask?.cancel()
+            boomerangProgressTask?.cancel()
+            burstResetTask?.cancel()
             resetControllerSessionState()
             services.webRtcSession.stop()
         }
@@ -355,6 +364,7 @@ struct WaitingForApprovalScreen: View {
 
     private var previewConnectionOverlayText: String? {
         guard room?.controllerApproved == true else { return nil }
+        guard Date.now >= suppressPreviewNetworkWarningUntil else { return nil }
         if firstFrameRetryCount > 0 {
             return "Reconnecting preview"
         }
@@ -442,8 +452,8 @@ struct WaitingForApprovalScreen: View {
 
     private var controllerModeStrip: some View {
         HStack(spacing: 6) {
-            modeButton("video", label: "VIDEO")
             modeButton("photo", label: "PHOTO")
+            modeButton("video", label: "VIDEO")
             modeButton("portrait", label: "PORTRAIT")
         }
         .padding(4)
@@ -452,44 +462,41 @@ struct WaitingForApprovalScreen: View {
     }
 
     private var controllerPrimaryControls: some View {
-        ZStack {
+        VStack(spacing: 12) {
+            controllerModeStrip
+            burstCountPill
+
+            HStack(alignment: .center, spacing: 28) {
+                controllerLeftActions
+                    .frame(width: 78)
+
+                shutterButton
+
+                controllerRightActions
+                    .frame(width: 78)
+            }
+            .frame(maxWidth: 340)
+
             if isVideoRecording {
                 recordingControls
-            } else {
-                VStack(spacing: 10) {
-                    shutterButton
-                    controllerModeAndFlipRow
-                }
-                .frame(maxWidth: 320)
             }
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 12)
     }
 
     private var controllerLeftActions: some View {
-        EmptyView()
+        VStack(spacing: 12) {
+            if cameraMode == "video" {
+                videoHdrButton
+            }
+        }
     }
 
     private var controllerRightActions: some View {
         VStack(spacing: 12) {
-            EmptyView()
+            lensFlipButton(size: 54)
         }
-    }
-
-    private var controllerModeAndFlipRow: some View {
-        ZStack {
-            controllerModeStrip
-                .frame(maxWidth: .infinity, alignment: .center)
-
-            HStack {
-                Spacer(minLength: 0)
-                lensFlipButton(size: 48)
-            }
-        }
-        .frame(maxWidth: 320)
-        .padding(.bottom, 10)
-        .offset(y: 8)
     }
 
     @ViewBuilder
@@ -690,19 +697,20 @@ struct WaitingForApprovalScreen: View {
     }
 
     private var recordingControls: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 16) {
-                CameraCircleButton(systemName: isVideoPaused ? "play.fill" : "pause.fill", size: 50) {
-                    requestVideoPauseResume()
-                }
-                CameraCircleButton(systemName: "stop.fill", size: 72, role: .destructive) {
-                    requestCapture()
-                }
-                lensFlipButton(size: 50)
+        HStack(spacing: 14) {
+            AndroidControlButton(
+                systemName: isVideoPaused ? "play.fill" : "pause.fill",
+                label: isVideoPaused ? "Resume" : "Pause",
+                isSelected: isVideoPaused
+            ) {
+                requestVideoPauseResume()
             }
-            Text("VIDEO")
-                .font(.caption2.weight(.bold))
-                .foregroundStyle(.red)
+            .disabled(isCaptureRequesting || isSwitchingCameraDuringRecording)
+
+            AndroidControlButton(systemName: "stop.fill", label: "Stop", tint: .red) {
+                requestCapture()
+            }
+            .disabled(isCaptureRequesting)
         }
     }
 
@@ -711,18 +719,14 @@ struct WaitingForApprovalScreen: View {
     }
 
     private func lensFlipButton(size: CGFloat) -> some View {
-        CameraCircleButton(
+        AndroidControlButton(
             systemName: lensFacing == .back ? "camera.rotate" : "camera.rotate.fill",
+            label: "Flip",
             size: size
         ) {
             switchControllerLens()
         }
-    }
-
-    private var boomerangButton: some View {
-        CameraCircleButton(systemName: "infinity", size: 46) {
-            showTemporaryControlFeedback("Boomerang next")
-        }
+        .disabled(isSwitchingCameraDuringRecording)
     }
 
     private var captureModeBadge: some View {
@@ -740,12 +744,25 @@ struct WaitingForApprovalScreen: View {
         }
     }
 
+    @ViewBuilder
+    private var burstCountPill: some View {
+        if burstCount > 1 {
+            Text("BURST \(burstCount)")
+                .font(.system(size: 11, weight: .black).monospacedDigit())
+                .foregroundStyle(.yellow)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.black.opacity(0.58), in: Capsule())
+                .overlay(Capsule().stroke(.yellow.opacity(0.42), lineWidth: 1))
+        }
+    }
+
     private var recordingStatusPill: some View {
         HStack(spacing: 7) {
             Circle()
-                .fill(.red)
+                .fill(isVideoPaused ? .yellow : .red)
                 .frame(width: 7, height: 7)
-            Text("Recording")
+            Text(isVideoPaused ? "Paused" : "Recording")
                 .font(.caption2.weight(.semibold))
         }
         .foregroundStyle(.white)
@@ -755,10 +772,10 @@ struct WaitingForApprovalScreen: View {
     }
 
     private var portraitToggleButton: some View {
-        CameraCircleButton(
+        AndroidControlButton(
             systemName: "person.crop.rectangle",
-            size: 58,
-            isSelected: showPortraitControls && cameraMode == "portrait"
+            label: "Portrait",
+            isSelected: cameraMode == "portrait"
         ) {
             if cameraMode != "portrait" {
                 updateCameraMode("portrait")
@@ -772,9 +789,9 @@ struct WaitingForApprovalScreen: View {
     }
 
     private var videoHdrButton: some View {
-        CameraCircleButton(
+        AndroidControlButton(
             systemName: "h.square",
-            size: 58,
+            label: "HDR",
             isSelected: room?.videoHdrEnabled == true
         ) {
             updateVideoHdrEnabled(!(room?.videoHdrEnabled ?? false))
@@ -832,6 +849,14 @@ struct WaitingForApprovalScreen: View {
                 ControllerRailButton(systemName: "sparkles", label: "Scene", isSelected: room?.sceneDetectionEnabled == true) {
                     updateSceneDetectionEnabled(!(room?.sceneDetectionEnabled ?? false))
                 }
+
+                if !isVideoRecording {
+                    ControllerRailButton(systemName: "infinity", label: "Boom", isSelected: isBoomerangArmed) {
+                        armBoomerangShutter()
+                    }
+                    .disabled(isCaptureRequesting || isSwitchingCameraDuringRecording)
+                }
+
             }
 
             ControllerRailButton(systemName: isControllerToolRailExpanded ? "chevron.up" : "ellipsis", label: isControllerToolRailExpanded ? "Less" : "More") {
@@ -1153,43 +1178,81 @@ struct WaitingForApprovalScreen: View {
 
     private var shutterButton: some View {
         Button { requestCapture() } label: {
-            ZStack {
-                Circle()
-                    .stroke(.white.opacity(0.96), lineWidth: 5)
-                    .frame(width: 84, height: 84)
-                if cameraMode == "video", isVideoRecording {
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.red)
-                        .frame(width: 42, height: 42)
-                } else {
+            VStack(spacing: 6) {
+                ZStack {
                     Circle()
-                        .fill(shutterFillColor)
-                        .frame(width: shutterInnerSize, height: shutterInnerSize)
+                        .stroke(shutterRingColor, lineWidth: 5)
+                        .frame(width: 86, height: 86)
+
+                    if isBoomerangCaptureAnimating {
+                        Circle()
+                            .trim(from: 0, to: boomerangCaptureProgress)
+                            .stroke(.yellow, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                            .frame(width: 86, height: 86)
+                            .rotationEffect(.degrees(-90))
+                        Circle()
+                            .fill(Color.yellow)
+                            .frame(width: 12, height: 12)
+                    } else if cameraMode == "video", isVideoRecording {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(Color.red)
+                            .frame(width: 38, height: 38)
+                    } else if isBoomerangArmed {
+                        Circle()
+                            .fill(Color.yellow)
+                            .frame(width: shutterInnerSize, height: shutterInnerSize)
+                        Image(systemName: "infinity")
+                            .font(.system(size: 25, weight: .black))
+                            .foregroundStyle(.black)
+                    } else if cameraMode == "video" {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: shutterInnerSize, height: shutterInnerSize)
+                    } else {
+                        Circle()
+                            .fill(shutterFillColor)
+                            .frame(width: shutterInnerSize, height: shutterInnerSize)
+                    }
                 }
+                .animation(.easeOut(duration: 0.12), value: isCaptureRequesting)
+                .animation(.easeOut(duration: 0.16), value: isVideoRecording)
+                .animation(.easeOut(duration: 0.16), value: cameraMode)
+                .animation(.easeOut(duration: 0.16), value: isBoomerangArmed)
+                .animation(.linear(duration: 0.08), value: boomerangCaptureProgress)
+
+                Text(shutterStateLabel)
+                    .font(.system(size: 11, weight: .black))
+                    .foregroundStyle(shutterRingColor)
+                    .frame(height: 13)
             }
-            .animation(.easeOut(duration: 0.12), value: isCaptureRequesting)
-            .animation(.easeOut(duration: 0.16), value: isVideoRecording)
         }
         .buttonStyle(.plain)
         .disabled(isCaptureRequesting || isSwitchingCameraDuringRecording || room?.status == .ended)
-        .accessibilityLabel(cameraMode == "video" ? "Record video" : "Capture photo")
+        .accessibilityLabel(shutterStateLabel)
     }
 
     private var shutterInnerSize: CGFloat {
-        if isCaptureRequesting {
-            return 58
-        }
-        if cameraMode == "video", isVideoRecording {
-            return 52
-        }
-        return 66
+        isCaptureRequesting ? 58 : 64
     }
 
     private var shutterFillColor: Color {
-        if cameraMode == "video" {
-            return isVideoRecording ? .red : .white
-        }
-        return isCaptureRequesting ? .white.opacity(0.72) : .white
+        isCaptureRequesting ? .white.opacity(0.72) : .white
+    }
+
+    private var shutterRingColor: Color {
+        if isBoomerangCaptureAnimating { return .yellow }
+        if cameraMode == "video" || isVideoRecording { return .red }
+        if isBoomerangArmed { return .yellow }
+        if cameraMode == "portrait" { return Color(red: 0.78, green: 0.62, blue: 1.0) }
+        return .white.opacity(0.96)
+    }
+
+    private var shutterStateLabel: String {
+        if isBoomerangCaptureAnimating { return "BOOM" }
+        if isBoomerangArmed { return "BOOM \(BoomerangCaptureDefaults.durationLabel)" }
+        if cameraMode == "video" { return isVideoRecording ? "STOP" : "VIDEO" }
+        if cameraMode == "portrait" { return "PORTRAIT" }
+        return "PHOTO"
     }
 
     private var statusText: String {
@@ -1434,6 +1497,19 @@ struct WaitingForApprovalScreen: View {
         }
     }
 
+    private func armBoomerangShutter() {
+        guard !isCaptureRequesting, !isSwitchingCameraDuringRecording, !isVideoRecording else { return }
+        isBoomerangArmed.toggle()
+        if isBoomerangArmed {
+            showManualExposure = false
+            showPortraitControls = false
+            showZoomBar = false
+            showTemporaryControlFeedback("Boomerang ready")
+        } else {
+            showTemporaryControlFeedback("Boomerang off")
+        }
+    }
+
     private func requestVideoPauseResume() {
         guard isVideoRecording, !isCaptureRequesting, !isSwitchingCameraDuringRecording else { return }
         let requestType = isVideoPaused ? "video_resume" : "video_pause"
@@ -1449,6 +1525,9 @@ struct WaitingForApprovalScreen: View {
                 captureFeedback = nil
                 errorMessage = error.localizedDescription
                 isCaptureRequesting = false
+                if requestType == "boomerang" {
+                    stopBoomerangShutterProgress()
+                }
             }
         }
     }
@@ -1458,7 +1537,13 @@ struct WaitingForApprovalScreen: View {
         guard !isCaptureRequesting else { return }
         guard !isSwitchingCameraDuringRecording || requestType == "video_stop" else { return }
         isCaptureRequesting = true
-        captureFeedback = requestType == "photo" ? "Capture sent" : "Capturing..."
+        if requestType == "boomerang" {
+            isBoomerangArmed = false
+            startBoomerangShutterProgress()
+            captureFeedback = nil
+        } else {
+            captureFeedback = captureFeedbackText(for: requestType)
+        }
         withAnimation(.easeOut(duration: 0.08)) {
             shutterFlashVisible = true
         }
@@ -1468,7 +1553,7 @@ struct WaitingForApprovalScreen: View {
                 withAnimation(.easeOut(duration: 0.16)) {
                     shutterFlashVisible = false
                 }
-                if requestType == "photo" {
+                if requestType == "photo" || requestType == "boomerang" {
                     isCaptureRequesting = false
                 }
             }
@@ -1485,9 +1570,16 @@ struct WaitingForApprovalScreen: View {
                     isVideoPaused = false
                     captureFeedback = "Recording stopped"
                 } else {
+                    if requestType == "boomerang" {
+                        isBoomerangArmed = false
+                        captureFeedback = nil
+                    } else {
+                        incrementBurstCount()
+                    }
+                    let feedbackToClear = captureFeedback
                     Task { @MainActor in
-                        try? await Task.sleep(for: .milliseconds(450))
-                        if captureFeedback == "Capture sent" {
+                        try? await Task.sleep(for: .milliseconds(650))
+                        if captureFeedback == feedbackToClear {
                             captureFeedback = nil
                         }
                     }
@@ -1506,13 +1598,62 @@ struct WaitingForApprovalScreen: View {
         if cameraMode == "video" {
             return isVideoRecording ? "video_stop" : "video_start"
         }
+        if isBoomerangArmed {
+            return "boomerang"
+        }
         return "photo"
+    }
+
+    private func captureFeedbackText(for requestType: String) -> String {
+        switch requestType {
+        case "photo": return "Capture sent"
+        case "boomerang": return ""
+        case "video_start": return "Starting video..."
+        case "video_stop": return "Stopping video..."
+        default: return "Capturing..."
+        }
+    }
+
+    private func startBoomerangShutterProgress() {
+        boomerangProgressTask?.cancel()
+        suppressPreviewNetworkWarningUntil = Date.now.addingTimeInterval(BoomerangCaptureDefaults.safetyTimeoutSeconds + 5.0)
+        isBoomerangCaptureAnimating = true
+        boomerangCaptureProgress = 0
+
+        boomerangProgressTask = Task { @MainActor in
+            let steps = 20
+            for step in 1...steps {
+                try? await Task.sleep(for: .milliseconds(BoomerangCaptureDefaults.captureDurationMilliseconds / steps))
+                guard !Task.isCancelled else { return }
+                boomerangCaptureProgress = Double(step) / Double(steps)
+            }
+            stopBoomerangShutterProgress()
+        }
+    }
+
+    private func stopBoomerangShutterProgress() {
+        boomerangProgressTask?.cancel()
+        boomerangProgressTask = nil
+        isBoomerangCaptureAnimating = false
+        boomerangCaptureProgress = 0
+    }
+
+    private func incrementBurstCount() {
+        burstResetTask?.cancel()
+        burstCount += 1
+        burstResetTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1_300))
+            guard !Task.isCancelled else { return }
+            burstCount = 0
+            burstResetTask = nil
+        }
     }
 
     private func updateCameraMode(_ mode: String) {
         guard cameraMode != mode else { return }
         let shouldStopActiveVideo = cameraMode == "video" && mode != "video" && isVideoRecording
         cameraMode = mode
+        isBoomerangArmed = false
         if mode != "video" {
             isVideoRecording = false
             isVideoPaused = false
@@ -1561,6 +1702,13 @@ struct WaitingForApprovalScreen: View {
         isCaptureRequesting = false
         isSwitchingCameraDuringRecording = false
         isVideoRecording = false
+        isVideoPaused = false
+        isBoomerangArmed = false
+        suppressPreviewNetworkWarningUntil = Date.distantPast
+        stopBoomerangShutterProgress()
+        burstResetTask?.cancel()
+        burstResetTask = nil
+        burstCount = 0
         captureFeedback = nil
     }
 
@@ -1683,6 +1831,36 @@ struct WaitingForApprovalScreen: View {
                 await MainActor.run { errorMessage = error.localizedDescription }
             }
         }
+    }
+}
+
+private struct AndroidControlButton: View {
+    let systemName: String
+    let label: String
+    var size: CGFloat = 58
+    var tint: Color = .white
+    var isSelected = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 5) {
+                Image(systemName: systemName)
+                    .font(.system(size: size * 0.34, weight: .bold))
+                    .frame(width: size, height: size)
+                    .foregroundStyle(isSelected ? .black : tint)
+                    .background(isSelected ? tint : Color.black.opacity(0.52), in: Circle())
+                    .overlay(Circle().stroke(tint.opacity(isSelected ? 0.65 : 0.22), lineWidth: 1))
+
+                Text(label)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.white.opacity(isSelected ? 0.96 : 0.72))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .frame(width: 76)
+        }
+        .buttonStyle(.plain)
     }
 }
 
