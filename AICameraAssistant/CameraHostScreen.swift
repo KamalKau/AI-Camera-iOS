@@ -32,6 +32,7 @@ struct CameraHostScreen: View {
     @State private var hostBoomerangCaptureProgress = 0.0
     @State private var hostBoomerangProgressTask: Task<Void, Never>?
     @State private var boomerangStatusMessage: String?
+    @State private var hostBurstCaptureTask: Task<Void, Never>?
 
     var body: some View {
         GeometryReader { geometry in
@@ -94,6 +95,7 @@ struct CameraHostScreen: View {
             hostPreviewSwitchTask?.cancel()
             hostFaceDetectionTask?.cancel()
             hostBoomerangProgressTask?.cancel()
+            hostBurstCaptureTask?.cancel()
             Task {
                 await services.webRtcSession.finishHostVideoRecordingBeforeTeardown()
                 camera.stop()
@@ -626,6 +628,10 @@ struct CameraHostScreen: View {
     private func handleCaptureRequest(_ request: CaptureRequest?) {
         guard let request, request.id != lastHandledCaptureRequestId else { return }
         lastHandledCaptureRequestId = request.id
+        if hostBurstCaptureTask != nil, request.type != "burst_stop" {
+            resetCaptureRequest()
+            return
+        }
         guard !isHandlingRemoteCapture else {
             resetCaptureRequest()
             return
@@ -654,6 +660,14 @@ struct CameraHostScreen: View {
                 isHandlingRemoteCapture = false
             case "boomerang":
                 await handleBoomerangCapture()
+            case "burst_start":
+                resetCaptureRequest()
+                startHostBurstCaptureIfPossible()
+                isHandlingRemoteCapture = false
+            case "burst_stop":
+                resetCaptureRequest()
+                stopHostBurstCapture()
+                isHandlingRemoteCapture = false
             default:
                 resetCaptureRequest()
                 if services.webRtcSession.state != .idle {
@@ -675,6 +689,55 @@ struct CameraHostScreen: View {
                     camera.capturePhoto(aspectRatio: CameraAspectRatio(roomValue: aspectRatioMode)) { _ in
                         isHandlingRemoteCapture = false
                     }
+                }
+            }
+        }
+    }
+
+    private func startHostBurstCaptureIfPossible() {
+        guard hostBurstCaptureTask == nil else { return }
+        guard !services.webRtcSession.isHostVideoRecording else { return }
+        let maximumBurstCaptureCount = 100
+        hostBurstCaptureTask = Task { @MainActor in
+            defer {
+                hostBurstCaptureTask = nil
+            }
+
+            for _ in 0..<maximumBurstCaptureCount {
+                guard !Task.isCancelled else { return }
+                await captureSingleHostBurstPhoto()
+                try? await Task.sleep(for: .milliseconds(160))
+            }
+        }
+    }
+
+    private func stopHostBurstCapture() {
+        hostBurstCaptureTask?.cancel()
+        hostBurstCaptureTask = nil
+    }
+
+    private func captureSingleHostBurstPhoto() async {
+        if services.webRtcSession.state != .idle {
+            await withCheckedContinuation { continuation in
+                services.webRtcSession.captureHostPhoto(aspectRatio: CameraAspectRatio(roomValue: aspectRatioMode), wantsPortraitMatte: false) { image, data, capturedDeviceOrientation, lensFacing, useLandscapeCanvas, _ in
+                    Task {
+                        await camera.saveCapturedPhotoFromStream(
+                            image,
+                            data: data,
+                            capturedDeviceOrientation: capturedDeviceOrientation,
+                            lensFacing: lensFacing,
+                            useLandscapeCanvas: useLandscapeCanvas,
+                            aspectRatio: CameraAspectRatio(roomValue: aspectRatioMode),
+                            saveToPhotoLibrary: false
+                        )
+                    }
+                    continuation.resume()
+                }
+            }
+        } else {
+            await withCheckedContinuation { continuation in
+                camera.capturePhoto(aspectRatio: CameraAspectRatio(roomValue: aspectRatioMode)) { _ in
+                    continuation.resume()
                 }
             }
         }

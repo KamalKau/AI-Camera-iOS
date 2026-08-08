@@ -15,6 +15,9 @@ struct WaitingForApprovalScreen: View {
     @State private var pendingAspectRatioMode: String?
     @State private var isVideoRecording = false
     @State private var isVideoPaused = false
+    @State private var videoRecordingStartedAt: Date?
+    @State private var videoRecordingPausedAt: Date?
+    @State private var accumulatedVideoPauseDuration: TimeInterval = 0
     @State private var errorMessage: String?
     @State private var zoomPublishTask: Task<Void, Never>?
     @State private var focusReticlePoint: CGPoint?
@@ -34,6 +37,10 @@ struct WaitingForApprovalScreen: View {
     @State private var suppressPreviewNetworkWarningUntil = Date.distantPast
     @State private var burstCount = 0
     @State private var burstResetTask: Task<Void, Never>?
+    @State private var isBurstCapturing = false
+    @State private var burstCaptureTask: Task<Void, Never>?
+    @State private var didTriggerBurstDrag = false
+    @State private var suppressNextShutterTap = false
     @State private var controllerPreviewLensFacing: LensFacing = .back
     @State private var controllerPreviewLensTask: Task<Void, Never>?
     @State private var controllerPreviewLensTarget: LensFacing?
@@ -104,6 +111,7 @@ struct WaitingForApprovalScreen: View {
             controllerPreviewLensTask?.cancel()
             controllerLensSwitchTask?.cancel()
             boomerangProgressTask?.cancel()
+            burstCaptureTask?.cancel()
             burstResetTask?.cancel()
             resetControllerSessionState()
             services.webRtcSession.stop()
@@ -747,17 +755,31 @@ struct WaitingForApprovalScreen: View {
     }
 
     private var recordingStatusPill: some View {
-        HStack(spacing: 7) {
-            Circle()
-                .fill(isVideoPaused ? .yellow : .red)
-                .frame(width: 7, height: 7)
-            Text(isVideoPaused ? "Paused" : "Recording")
-                .font(.caption2.weight(.semibold))
+        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+            HStack(spacing: 7) {
+                Circle()
+                    .fill(isVideoPaused ? .yellow : .red)
+                    .frame(width: 7, height: 7)
+                Text("\(isVideoPaused ? "PAUSED" : "REC") \(formattedRecordingDuration(at: timeline.date))")
+                    .font(.caption2.weight(.bold).monospacedDigit())
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 7)
+            .background(Color.black.opacity(0.48), in: Capsule())
+            .overlay(Capsule().stroke((isVideoPaused ? Color.yellow : Color.red).opacity(0.42), lineWidth: 1))
         }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .background(Color.black.opacity(0.48), in: Capsule())
+    }
+
+    private func formattedRecordingDuration(at date: Date) -> String {
+        let elapsed = max(0, Int(recordingDuration(at: date).rounded(.down)))
+        return String(format: "%02d:%02d", elapsed / 60, elapsed % 60)
+    }
+
+    private func recordingDuration(at date: Date) -> TimeInterval {
+        guard let videoRecordingStartedAt else { return 0 }
+        let referenceDate = videoRecordingPausedAt ?? date
+        return max(0, referenceDate.timeIntervalSince(videoRecordingStartedAt) - accumulatedVideoPauseDuration)
     }
 
     private var portraitToggleButton: some View {
@@ -819,6 +841,14 @@ struct WaitingForApprovalScreen: View {
             }
 
             if isControllerToolRailExpanded {
+                ControllerRailButton(
+                    systemName: lensFacing == .back ? "camera.rotate" : "camera.rotate.fill",
+                    label: "Lens"
+                ) {
+                    switchControllerLens()
+                }
+                .disabled(isSwitchingCameraDuringRecording || isCaptureRequesting)
+
                 ControllerRailButton(systemName: "plus.magnifyingglass", label: "Zoom", isSelected: showZoomBar) {
                     withAnimation(.easeInOut(duration: 0.18)) {
                         showManualExposure = false
@@ -837,6 +867,14 @@ struct WaitingForApprovalScreen: View {
 
                 ControllerRailButton(systemName: "sparkles", label: "Scene", isSelected: room?.sceneDetectionEnabled == true) {
                     updateSceneDetectionEnabled(!(room?.sceneDetectionEnabled ?? false))
+                }
+
+                ControllerRailButton(systemName: "moon.stars", label: "Night", isSelected: room?.nightModeEnabled == true) {
+                    updateNightModeEnabled(!(room?.nightModeEnabled ?? false))
+                }
+
+                ControllerRailButton(systemName: "h.square", label: "HDR", isSelected: room?.videoHdrEnabled == true) {
+                    updateVideoHdrEnabled(!(room?.videoHdrEnabled ?? false))
                 }
 
                 if !isVideoRecording {
@@ -1217,7 +1255,28 @@ struct WaitingForApprovalScreen: View {
         }
         .buttonStyle(.plain)
         .disabled(isCaptureRequesting || isSwitchingCameraDuringRecording || room?.status == .ended)
+        .simultaneousGesture(shutterBurstDragGesture)
         .accessibilityLabel(shutterStateLabel)
+    }
+
+    private var shutterBurstDragGesture: some Gesture {
+        DragGesture(minimumDistance: 12)
+            .onChanged { value in
+                guard !didTriggerBurstDrag else { return }
+                guard cameraMode == "photo" || cameraMode == "portrait" else { return }
+                guard value.translation.width <= -34, abs(value.translation.height) <= 42 else { return }
+                guard startBurstCaptureIfPossible() else { return }
+                didTriggerBurstDrag = true
+                suppressNextShutterTap = true
+            }
+            .onEnded { _ in
+                didTriggerBurstDrag = false
+                stopBurstCapture()
+                Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(350))
+                    suppressNextShutterTap = false
+                }
+            }
     }
 
     private var shutterInnerSize: CGFloat {
@@ -1507,8 +1566,15 @@ struct WaitingForApprovalScreen: View {
         Task {
             do {
                 try await services.roomCaptureRequester.requestCapture(roomCode: roomCode, type: requestType)
-                isVideoPaused.toggle()
-                captureFeedback = isVideoPaused ? "Recording paused" : "Recording resumed"
+                if isVideoPaused {
+                    resumeRecordingTimer()
+                    isVideoPaused = false
+                    captureFeedback = "Recording resumed"
+                } else {
+                    pauseRecordingTimer()
+                    isVideoPaused = true
+                    captureFeedback = "Recording paused"
+                }
                 isCaptureRequesting = false
             } catch {
                 captureFeedback = nil
@@ -1522,7 +1588,12 @@ struct WaitingForApprovalScreen: View {
     }
 
     private func requestCapture() {
+        guard !suppressNextShutterTap else {
+            suppressNextShutterTap = false
+            return
+        }
         let requestType = captureRequestType
+        guard !isBurstCapturing else { return }
         guard !isCaptureRequesting else { return }
         guard !isSwitchingCameraDuringRecording || requestType == "video_stop" else { return }
         isCaptureRequesting = true
@@ -1553,10 +1624,12 @@ struct WaitingForApprovalScreen: View {
                 if requestType == "video_start" {
                     isVideoRecording = true
                     isVideoPaused = false
+                    startRecordingTimer()
                     captureFeedback = "Recording started"
                 } else if requestType == "video_stop" {
                     isVideoRecording = false
                     isVideoPaused = false
+                    stopRecordingTimer()
                     captureFeedback = "Recording stopped"
                 } else {
                     if requestType == "boomerang" {
@@ -1603,6 +1676,29 @@ struct WaitingForApprovalScreen: View {
         }
     }
 
+    private func startRecordingTimer() {
+        videoRecordingStartedAt = Date()
+        videoRecordingPausedAt = nil
+        accumulatedVideoPauseDuration = 0
+    }
+
+    private func pauseRecordingTimer() {
+        guard videoRecordingPausedAt == nil else { return }
+        videoRecordingPausedAt = Date()
+    }
+
+    private func resumeRecordingTimer() {
+        guard let videoRecordingPausedAt else { return }
+        accumulatedVideoPauseDuration += Date().timeIntervalSince(videoRecordingPausedAt)
+        self.videoRecordingPausedAt = nil
+    }
+
+    private func stopRecordingTimer() {
+        videoRecordingStartedAt = nil
+        videoRecordingPausedAt = nil
+        accumulatedVideoPauseDuration = 0
+    }
+
     private func startBoomerangShutterProgress() {
         boomerangProgressTask?.cancel()
         suppressPreviewNetworkWarningUntil = Date.now.addingTimeInterval(BoomerangCaptureDefaults.safetyTimeoutSeconds + 5.0)
@@ -1627,6 +1723,65 @@ struct WaitingForApprovalScreen: View {
         boomerangCaptureProgress = 0
     }
 
+    private func startBurstCaptureIfPossible() -> Bool {
+        guard !isBurstCapturing, !isCaptureRequesting, !isSwitchingCameraDuringRecording else { return false }
+        guard cameraMode == "photo" || cameraMode == "portrait" else { return false }
+        guard !isBoomerangArmed, !isBoomerangCaptureAnimating, !isVideoRecording else { return false }
+
+        let maximumBurstCaptureCount = 100
+        burstCaptureTask?.cancel()
+        burstResetTask?.cancel()
+        burstResetTask = nil
+        burstCount = 0
+        isBurstCapturing = true
+        captureFeedback = "Burst"
+        burstCaptureTask = Task { @MainActor in
+            do {
+                try await services.roomCaptureRequester.requestCapture(roomCode: roomCode, type: "burst_start")
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            } catch {
+                errorMessage = error.localizedDescription
+                finishControllerBurstFeedback()
+                return
+            }
+
+            for _ in 0..<maximumBurstCaptureCount {
+                guard !Task.isCancelled else { return }
+                incrementBurstCount()
+                captureFeedback = "Burst \(burstCount)"
+                try? await Task.sleep(for: .milliseconds(160))
+            }
+        }
+        return true
+    }
+
+    private func stopBurstCapture() {
+        guard isBurstCapturing else { return }
+        burstCaptureTask?.cancel()
+        Task {
+            do {
+                try await services.roomCaptureRequester.requestCapture(roomCode: roomCode, type: "burst_stop")
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+            await MainActor.run {
+                finishControllerBurstFeedback()
+            }
+        }
+    }
+
+    private func finishControllerBurstFeedback() {
+        isBurstCapturing = false
+        burstCaptureTask = nil
+        let feedbackToClear = captureFeedback
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(650))
+            if captureFeedback == feedbackToClear {
+                captureFeedback = nil
+            }
+        }
+    }
+
     private func incrementBurstCount() {
         burstResetTask?.cancel()
         burstCount += 1
@@ -1646,6 +1801,7 @@ struct WaitingForApprovalScreen: View {
         if mode != "video" {
             isVideoRecording = false
             isVideoPaused = false
+            stopRecordingTimer()
         }
         if mode != "portrait" {
             showPortraitControls = false
@@ -1692,7 +1848,11 @@ struct WaitingForApprovalScreen: View {
         isSwitchingCameraDuringRecording = false
         isVideoRecording = false
         isVideoPaused = false
+        stopRecordingTimer()
         isBoomerangArmed = false
+        isBurstCapturing = false
+        burstCaptureTask?.cancel()
+        burstCaptureTask = nil
         suppressPreviewNetworkWarningUntil = Date.distantPast
         stopBoomerangShutterProgress()
         burstResetTask?.cancel()
@@ -1715,6 +1875,16 @@ struct WaitingForApprovalScreen: View {
         Task {
             do {
                 try await services.roomCameraControlUpdater.updateVideoHdrEnabled(roomCode: roomCode, videoHdrEnabled: enabled)
+            } catch {
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    private func updateNightModeEnabled(_ enabled: Bool) {
+        Task {
+            do {
+                try await services.roomCameraControlUpdater.updateNightModeEnabled(roomCode: roomCode, nightModeEnabled: enabled)
             } catch {
                 errorMessage = error.localizedDescription
             }

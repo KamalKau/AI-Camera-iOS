@@ -57,7 +57,7 @@ enum RoomSchema {
     nonisolated static let cameraModes = ["photo", "video", "portrait"]
     nonisolated static let flashModes = ["off", "auto", "on"]
     nonisolated static let portraitEffects = ["blur", "studio", "mono", "backdrop", "low_key_mono", "high_key_mono", "color_point"]
-    nonisolated static let captureRequestTypes = ["photo", "boomerang", "video_start", "video_stop", "video_pause", "video_resume"]
+    nonisolated static let captureRequestTypes = ["photo", "boomerang", "video_start", "video_stop", "video_pause", "video_resume", "burst_start", "burst_stop"]
 
     nonisolated static func safeAspectRatioMode(_ mode: String) -> String {
         aspectRatioModes.contains(mode) ? mode : defaultAspectRatioMode
