@@ -35,6 +35,7 @@ final class CameraController: NSObject, ObservableObject {
     private var isPhotoOutputPrepared = false
     private var currentInput: AVCaptureDeviceInput?
     private var pendingPhotoDelegates: [Int64: NSObject] = [:]
+    private var activeExposureIndex = 0
     private let photoSaving: any PhotoSaving
     private let nightModeMotionMonitor = NightModeMotionMonitor()
     private var nightModeMonitorTask: Task<Void, Never>?
@@ -161,6 +162,7 @@ final class CameraController: NSObject, ObservableObject {
 
     func applyExposureIndex(_ exposureIndex: Int) {
         let clampedIndex = min(8, max(-8, exposureIndex))
+        activeExposureIndex = clampedIndex
         sessionQueue.async { [weak self] in
             guard let self, let device = self.currentInput?.device else { return }
             self.applyExposureOnQueue(clampedIndex, device: device)
@@ -440,6 +442,7 @@ final class CameraController: NSObject, ObservableObject {
         isPhotoOutputPrepared = false
         let selectedLens = lensFacing
         let selectedZoom = zoomLevel
+        let selectedExposureIndex = activeExposureIndex
         let session = session
         let photoOutput = photoOutput
         sessionQueue.async { [weak self] in
@@ -468,7 +471,7 @@ final class CameraController: NSObject, ObservableObject {
                     Task { @MainActor in self.isPhotoOutputPrepared = true }
                 }
                 self.applyZoomOnQueue(selectedZoom, device: device)
-                self.applyExposureOnQueue(0, device: device)
+                self.applyExposureOnQueue(selectedExposureIndex, device: device)
                 if !session.isRunning { session.startRunning() }
                 Task { @MainActor in
                     self.isRunning = session.isRunning
@@ -485,6 +488,7 @@ final class CameraController: NSObject, ObservableObject {
         isPhotoOutputPrepared = false
         let selectedLens = lensFacing
         let selectedZoom = zoomLevel
+        let selectedExposureIndex = activeExposureIndex
         let session = session
         let photoOutput = photoOutput
 
@@ -521,7 +525,7 @@ final class CameraController: NSObject, ObservableObject {
                         Task { @MainActor in self.isPhotoOutputPrepared = true }
                     }
                     self.applyZoomOnQueue(selectedZoom, device: device)
-                    self.applyExposureOnQueue(0, device: device)
+                    self.applyExposureOnQueue(selectedExposureIndex, device: device)
                     if !session.isRunning { session.startRunning() }
                     let running = session.isRunning
                     Task { @MainActor in
@@ -542,6 +546,7 @@ final class CameraController: NSObject, ObservableObject {
         isPhotoOutputPrepared = false
         let selectedLens = lensFacing
         let selectedZoom = zoomLevel
+        let selectedExposureIndex = activeExposureIndex
         let session = session
         let photoOutput = photoOutput
 
@@ -578,7 +583,7 @@ final class CameraController: NSObject, ObservableObject {
                     session.commitConfiguration()
                     self.applyBoomerangFrameRateOnQueue(device)
                     self.applyZoomOnQueue(selectedZoom, device: device)
-                    self.applyExposureOnQueue(0, device: device)
+                    self.applyExposureOnQueue(selectedExposureIndex, device: device)
                     session.startRunning()
                     let running = session.isRunning
                     Task { @MainActor in self.isRunning = running }
@@ -615,6 +620,7 @@ final class CameraController: NSObject, ObservableObject {
         let motionMagnitude = nightModeMotionMonitor.currentMagnitude()
         let userEnabled = isNightModeEnabledByUser
         let hasExistingNightPlan = nightModeState.plan != nil
+        let selectedExposureIndex = activeExposureIndex
         sessionQueue.async { [weak self] in
             guard let self, let device = self.currentInput?.device else { return }
             let metrics = NightModeSceneMetrics(
@@ -629,7 +635,7 @@ final class CameraController: NSObject, ObservableObject {
             )
             let plan = NightModePlanner.plan(for: metrics)
             let previewEnabled = userEnabled && (plan != nil || hasExistingNightPlan) && metrics.lowLightScore >= NightModePlanner.disableThreshold * 0.55
-            CameraDeviceControls.applyNightModePreview(to: device, enabled: previewEnabled, quality: plan?.quality ?? 0)
+            CameraDeviceControls.applyNightModePreview(to: device, enabled: previewEnabled, quality: plan?.quality ?? 0, exposureIndex: selectedExposureIndex)
             Task { @MainActor in
                 self.applyNightModePlan(plan, lowLightScore: metrics.lowLightScore)
             }

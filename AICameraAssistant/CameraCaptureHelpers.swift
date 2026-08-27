@@ -94,7 +94,7 @@ enum CameraDeviceControls {
         }
     }
 
-    nonisolated static func applyNightModePreview(to device: AVCaptureDevice, enabled: Bool, quality: Double) {
+    nonisolated static func applyNightModePreview(to device: AVCaptureDevice, enabled: Bool, quality: Double, exposureIndex: Int) {
         do {
             try device.lockForConfiguration()
             if device.isLowLightBoostSupported {
@@ -104,12 +104,13 @@ enum CameraDeviceControls {
                 device.exposureMode = .continuousAutoExposure
             }
 
+            let userBias = Float(min(8, max(-8, exposureIndex))) / 2.0
             let previewBias: Float
             if enabled {
                 let normalizedQuality = min(1.0, max(0.0, quality))
-                previewBias = Float(0.45 + normalizedQuality * 0.35)
+                previewBias = userBias + Float(0.35 + normalizedQuality * 0.25)
             } else {
-                previewBias = 0
+                previewBias = userBias
             }
             let clampedBias = min(device.maxExposureTargetBias, max(device.minExposureTargetBias, previewBias))
             device.setExposureTargetBias(clampedBias, completionHandler: nil)

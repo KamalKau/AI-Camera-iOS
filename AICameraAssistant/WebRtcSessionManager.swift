@@ -1035,7 +1035,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         let plan = NightModePlanner.plan(for: metrics)
         let previewPlan = plan ?? nightModeState.plan
         let previewEnabled = isNightModeEnabledByUser && previewPlan != nil && metrics.lowLightScore >= NightModePlanner.disableThreshold * 0.55
-        CameraDeviceControls.applyNightModePreview(to: device, enabled: previewEnabled, quality: previewPlan?.quality ?? 0)
+        CameraDeviceControls.applyNightModePreview(to: device, enabled: previewEnabled, quality: previewPlan?.quality ?? 0, exposureIndex: activeExposureIndex)
         applyNightModePlan(plan, lowLightScore: metrics.lowLightScore)
     }
 
