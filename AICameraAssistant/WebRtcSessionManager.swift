@@ -231,6 +231,8 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     @Published private(set) var state: WebRtcConnectionState = .idle
     @Published private(set) var streamQualityMode: StreamQualityMode = .quality
     @Published private(set) var capturedLensFacing: LensFacing = .back
+    @Published private(set) var nightModeState: NightModeState = .unavailable
+    @Published var isNightModeEnabledByUser = true
     @Published private(set) var decodedVideoFrameCount = 0
     @Published private(set) var reconnectCount = 0
     @Published private(set) var iceConnectionStateDescription = "idle"
@@ -264,7 +266,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     private var hostAudioInput: AVCaptureDeviceInput?
     private var hostAudioRecorder: AVAudioRecorder?
     private var hostStandaloneAudioSegments: [URL] = []
-    private var pendingHostPhotoDelegates: [Int64: PhotoCaptureDelegate] = [:]
+    private var pendingHostPhotoDelegates: [Int64: NSObject] = [:]
     private var hostMovieDelegate: MovieCaptureDelegate?
     private var hostRecordingSegments: [URL] = []
     private var hostRecordingCompletion: ((URL?, Error?) -> Void)?
@@ -276,6 +278,8 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     private var activeExposureIndex = 0
     private var isRestartingCapture = false
     private var isThrottlingLocalStreamForRecording = false
+    private let nightModeMotionMonitor = NightModeMotionMonitor()
+    private var nightModeMonitorTask: Task<Void, Never>?
     #endif
 
     override init() {
@@ -394,6 +398,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         isHostVideoRecording = false
         isHostVideoPaused = false
         isThrottlingLocalStreamForRecording = false
+        stopNightModeMonitoring()
         pendingHostPhotoDelegates.removeAll()
         activeExposureIndex = 0
         capturedLensFacing = .back
@@ -504,7 +509,12 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         #endif
     }
 
-    func captureHostPhoto(aspectRatio: CameraAspectRatio = .full, wantsPortraitMatte: Bool = false, completion: @escaping (UIImage?, Data?, UIDeviceOrientation, LensFacing, Bool, CIImage?) -> Void) {
+    func setNightModeEnabledByUser(_ enabled: Bool) {
+        isNightModeEnabledByUser = enabled
+        updateNightModeStateFromActiveDevice()
+    }
+
+    func captureHostPhoto(aspectRatio: CameraAspectRatio = .full, wantsPortraitMatte: Bool = false, nightModeEnabled: Bool = false, completion: @escaping (UIImage?, Data?, UIDeviceOrientation, LensFacing, Bool, CIImage?) -> Void) {
         #if canImport(WebRTC)
         let capturedDeviceOrientation = currentDeviceCaptureOrientation()
         let capturedLensFacing = activeCaptureDevice.map { $0.position == .front ? LensFacing.front : .back } ?? activeLensFacing
@@ -513,6 +523,202 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
             return
         }
 
+        if nightModeEnabled,
+           let plan = nightModeState.plan,
+           capturedLensFacing == .back,
+           captureHostNightPhoto(aspectRatio: aspectRatio, plan: plan, capturedDeviceOrientation: capturedDeviceOrientation, capturedLensFacing: capturedLensFacing, completion: completion) {
+            return
+        }
+
+        guard captureNativeHostPhoto(
+            aspectRatio: aspectRatio,
+            wantsPortraitMatte: wantsPortraitMatte,
+            nightModeEnabled: nightModeEnabled,
+            capturedDeviceOrientation: capturedDeviceOrientation,
+            capturedLensFacing: capturedLensFacing,
+            completion: completion
+        ) else {
+            captureHostPhotoFromPreviewFrame(
+                capturedDeviceOrientation: capturedDeviceOrientation,
+                capturedLensFacing: capturedLensFacing,
+                completion: completion
+            )
+            return
+        }
+        #else
+        let capturedDeviceOrientation = currentDeviceCaptureOrientation()
+        completion(nil, nil, capturedDeviceOrientation, activeLensFacing, false, nil)
+        #endif
+    }
+
+    #if canImport(WebRTC)
+    private func captureHostNightPhoto(
+        aspectRatio: CameraAspectRatio,
+        plan: NightModePlan,
+        capturedDeviceOrientation: UIDeviceOrientation,
+        capturedLensFacing: LensFacing,
+        completion: @escaping (UIImage?, Data?, UIDeviceOrientation, LensFacing, Bool, CIImage?) -> Void
+    ) -> Bool {
+        guard !nightModeState.isBusy else {
+            completion(nil, nil, capturedDeviceOrientation, capturedLensFacing, capturedDeviceOrientation.isLandscape, nil)
+            return true
+        }
+        nightModeState = .capturing(plan, progress: 0)
+        lockExposureAndFocusForNightCapture()
+
+        Task { @MainActor in
+            let bracketFrames = await captureNativeHostBracketFrames(aspectRatio: aspectRatio, plan: plan, capturedLensFacing: capturedLensFacing)
+            var frames = bracketFrames
+            if frames.isEmpty {
+                for index in 0..<plan.frameCount {
+                    guard !Task.isCancelled else { return }
+                    applyNightModeExposureBias(plan.exposureBias(forFrame: index))
+                    try? await Task.sleep(for: .milliseconds(90))
+                    if let frame = await captureNativeHostPhotoFrame(aspectRatio: aspectRatio, capturedDeviceOrientation: capturedDeviceOrientation, capturedLensFacing: capturedLensFacing) {
+                        frames.append(frame)
+                    }
+                    nightModeState = .capturing(plan, progress: Double(index + 1) / Double(plan.frameCount))
+                    if index < plan.frameCount - 1 {
+                        try? await Task.sleep(for: .milliseconds(Int(plan.frameInterval * 1_000)))
+                    }
+                }
+            } else {
+                nightModeState = .capturing(plan, progress: 1.0)
+            }
+
+            nightModeState = .processing(plan)
+            let processed = await Task.detached(priority: .userInitiated) {
+                await NightModePhotoProcessor().process(frames: frames, plan: plan, aspectRatio: aspectRatio)
+            }.value
+
+            restoreExposureAndFocusAfterNightCapture()
+            updateNightModeStateFromActiveDevice()
+            if let processed {
+                completion(processed.image, processed.data, capturedDeviceOrientation, capturedLensFacing, capturedDeviceOrientation.isLandscape, nil)
+            } else if let fallback = frames.last {
+                completion(fallback, fallback.jpegData(compressionQuality: 0.94), capturedDeviceOrientation, capturedLensFacing, capturedDeviceOrientation.isLandscape, nil)
+            } else {
+                completion(nil, nil, capturedDeviceOrientation, capturedLensFacing, capturedDeviceOrientation.isLandscape, nil)
+            }
+        }
+        return true
+    }
+
+    private func captureNativeHostBracketFrames(
+        aspectRatio: CameraAspectRatio,
+        plan: NightModePlan,
+        capturedLensFacing: LensFacing
+    ) async -> [UIImage] {
+        await withCheckedContinuation { continuation in
+            let photoOutput = hostPhotoOutput
+            let bracketCount = min(photoOutput.maxBracketedCapturePhotoCount, plan.frameCount)
+            guard cameraCapturer?.captureSession.outputs.contains(photoOutput) == true,
+                  photoOutput.connection(with: .video) != nil,
+                  bracketCount >= 3 else {
+                continuation.resume(returning: [])
+                return
+            }
+            let bracketedSettings = (0..<bracketCount).map {
+                AVCaptureAutoExposureBracketedStillImageSettings.autoExposureSettings(exposureTargetBias: plan.exposureBias(forFrame: $0))
+            }
+            let settings = AVCapturePhotoBracketSettings(rawPixelFormatType: 0, processedFormat: nil, bracketedSettings: bracketedSettings)
+            settings.photoQualityPrioritization = .quality
+            settings.isLensStabilizationEnabled = photoOutput.isLensStabilizationDuringBracketedCaptureSupported
+            let uniqueID = Int64(settings.uniqueID)
+            let delegate = BracketedPhotoCaptureDelegate { [weak self] images in
+                Task { @MainActor in
+                    self?.pendingHostPhotoDelegates[uniqueID] = nil
+                    continuation.resume(returning: images.map { $0.cropped(to: aspectRatio) })
+                }
+            }
+            pendingHostPhotoDelegates[uniqueID] = delegate
+            let captureDevice = activeCaptureDevice
+            hostCaptureQueue.async {
+                if let captureDevice {
+                    CameraDeviceControls.applyLowLightBoost(to: captureDevice, enabled: true)
+                }
+                configurePhotoConnection(photoOutput, lensFacing: capturedLensFacing)
+                photoOutput.capturePhoto(with: settings, delegate: delegate)
+            }
+        }
+    }
+
+    private func captureNativeHostPhotoFrame(
+        aspectRatio: CameraAspectRatio,
+        capturedDeviceOrientation: UIDeviceOrientation,
+        capturedLensFacing: LensFacing
+    ) async -> UIImage? {
+        await withCheckedContinuation { continuation in
+            guard captureNativeHostPhoto(
+                aspectRatio: aspectRatio,
+                wantsPortraitMatte: false,
+                nightModeEnabled: true,
+                capturedDeviceOrientation: capturedDeviceOrientation,
+                capturedLensFacing: capturedLensFacing,
+                completion: { image, _, _, _, _, _ in continuation.resume(returning: image) }
+            ) else {
+                continuation.resume(returning: nil)
+                return
+            }
+        }
+    }
+
+    private func captureNativeHostPhoto(
+        aspectRatio: CameraAspectRatio,
+        wantsPortraitMatte: Bool,
+        nightModeEnabled: Bool,
+        capturedDeviceOrientation: UIDeviceOrientation,
+        capturedLensFacing: LensFacing,
+        completion: @escaping (UIImage?, Data?, UIDeviceOrientation, LensFacing, Bool, CIImage?) -> Void
+    ) -> Bool {
+        guard cameraCapturer?.captureSession.outputs.contains(hostPhotoOutput) == true,
+              hostPhotoOutput.connection(with: .video) != nil else { return false }
+
+        let settings = AVCapturePhotoSettings()
+        settings.photoQualityPrioritization = nightModeEnabled ? .quality : .speed
+        Self.configurePortraitPhotoSettings(settings, output: hostPhotoOutput, enabled: wantsPortraitMatte)
+        let uniqueID = Int64(settings.uniqueID)
+        let delegate = PhotoCaptureDelegate { [weak self] image, data, diagnostics in
+            Task { @MainActor in
+                guard let self else { return }
+                self.pendingHostPhotoDelegates[uniqueID] = nil
+                let adjustedImage = image?.cropped(to: aspectRatio)
+                let adjustedData = aspectRatio == .full
+                    ? data
+                    : adjustedImage?.jpegData(compressionQuality: 0.94) ?? data
+                completion(
+                    adjustedImage,
+                    adjustedData,
+                    capturedDeviceOrientation,
+                    capturedLensFacing,
+                    capturedDeviceOrientation.isLandscape,
+                    diagnostics.portraitMask
+                )
+            }
+        }
+        pendingHostPhotoDelegates[uniqueID] = delegate
+
+        let selectedFlashMode = activeFlashMode.safeCameraFlashMode
+        let photoOutput = hostPhotoOutput
+        let captureDevice = activeCaptureDevice
+        hostCaptureQueue.async {
+            if let captureDevice {
+                CameraDeviceControls.applyLowLightBoost(to: captureDevice, enabled: nightModeEnabled)
+            }
+            if let flashMode = selectedFlashMode.avCaptureFlashMode(supportedModes: photoOutput.supportedFlashModes, lensFacing: capturedLensFacing) {
+                settings.flashMode = flashMode
+            }
+            configurePhotoConnection(photoOutput, lensFacing: capturedLensFacing)
+            photoOutput.capturePhoto(with: settings, delegate: delegate)
+        }
+        return true
+    }
+
+    private func captureHostPhotoFromPreviewFrame(
+        capturedDeviceOrientation: UIDeviceOrientation,
+        capturedLensFacing: LensFacing,
+        completion: @escaping (UIImage?, Data?, UIDeviceOrientation, LensFacing, Bool, CIImage?) -> Void
+    ) {
         let isLandscapeCapture = capturedDeviceOrientation.isLandscape
         let shouldCorrectFrontLandscape = capturedLensFacing == .front && isLandscapeCapture
         guard let image = localFrameSnapshotRenderer?.snapshotImage(
@@ -525,11 +731,8 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         }
         let data = image.jpegData(compressionQuality: 0.94)
         completion(image, data, capturedDeviceOrientation, capturedLensFacing, capturedDeviceOrientation.isLandscape, nil)
-        #else
-        let capturedDeviceOrientation = currentDeviceCaptureOrientation()
-        completion(nil, nil, capturedDeviceOrientation, activeLensFacing, false, nil)
-        #endif
     }
+    #endif
 
     func startHostVideoRecording(completion: @escaping (URL?, Error?) -> Void) {
         #if canImport(WebRTC)
@@ -646,7 +849,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
     }
 
     private nonisolated static func configurePhotoOutputForSpeed(_ photoOutput: AVCapturePhotoOutput) {
-        photoOutput.maxPhotoQualityPrioritization = .speed
+        photoOutput.maxPhotoQualityPrioritization = .quality
         if photoOutput.isDepthDataDeliverySupported {
             photoOutput.isDepthDataDeliveryEnabled = false
         }
@@ -795,6 +998,108 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         stopCurrentMovieRecordingSegment(finalizeAfterStop: false)
     }
 
+    private func startNightModeMonitoring() {
+        nightModeMotionMonitor.start()
+        nightModeMonitorTask?.cancel()
+        nightModeMonitorTask = Task { @MainActor in
+            while !Task.isCancelled {
+                updateNightModeStateFromActiveDevice()
+                try? await Task.sleep(for: .milliseconds(650))
+            }
+        }
+    }
+
+    private func stopNightModeMonitoring() {
+        nightModeMonitorTask?.cancel()
+        nightModeMonitorTask = nil
+        nightModeMotionMonitor.stop()
+        nightModeState = .unavailable
+    }
+
+    private func updateNightModeStateFromActiveDevice() {
+        guard !nightModeState.isBusy else { return }
+        guard let device = activeCaptureDevice else {
+            nightModeState = .unavailable
+            return
+        }
+        let metrics = NightModeSceneMetrics(
+            exposureDuration: CMTimeGetSeconds(device.exposureDuration),
+            iso: device.iso,
+            exposureTargetOffset: device.exposureTargetOffset,
+            isLowLightBoostSupported: device.isLowLightBoostSupported,
+            isLowLightBoostEnabled: device.isLowLightBoostEnabled,
+            lensFacing: device.position == .front ? .front : .back,
+            deviceType: device.deviceType,
+            motionMagnitude: nightModeMotionMonitor.currentMagnitude()
+        )
+        let plan = NightModePlanner.plan(for: metrics)
+        let previewPlan = plan ?? nightModeState.plan
+        let previewEnabled = isNightModeEnabledByUser && previewPlan != nil && metrics.lowLightScore >= NightModePlanner.disableThreshold * 0.55
+        CameraDeviceControls.applyNightModePreview(to: device, enabled: previewEnabled, quality: previewPlan?.quality ?? 0)
+        applyNightModePlan(plan, lowLightScore: metrics.lowLightScore)
+    }
+
+    private func applyNightModePlan(_ plan: NightModePlan?, lowLightScore: Double) {
+        let clearDisableThreshold = NightModePlanner.disableThreshold * 0.55
+        switch nightModeState {
+        case .active(let currentPlan), .suggested(let currentPlan):
+            guard let plan else {
+                if lowLightScore < clearDisableThreshold {
+                    nightModeState = .unavailable
+                } else {
+                    nightModeState = isNightModeEnabledByUser ? .active(currentPlan) : .suggested(currentPlan)
+                }
+                return
+            }
+            nightModeState = isNightModeEnabledByUser ? .active(plan) : .suggested(plan)
+        case .unavailable:
+            guard let plan, lowLightScore >= NightModePlanner.enableThreshold else { return }
+            nightModeState = isNightModeEnabledByUser ? .active(plan) : .suggested(plan)
+        case .capturing, .processing:
+            break
+        }
+    }
+
+    private func applyNightModeExposureBias(_ bias: Float) {
+        guard let device = activeCaptureDevice else { return }
+        CameraDeviceControls.applyExposureBias(to: device, bias: bias)
+    }
+
+    private func lockExposureAndFocusForNightCapture() {
+        guard let device = activeCaptureDevice else { return }
+        do {
+            try device.lockForConfiguration()
+            if device.isFocusModeSupported(.locked) {
+                device.focusMode = .locked
+            }
+            if device.isExposureModeSupported(.locked) {
+                device.exposureMode = .locked
+            }
+            if device.isLowLightBoostSupported {
+                device.automaticallyEnablesLowLightBoostWhenAvailable = true
+            }
+            device.unlockForConfiguration()
+        } catch {
+            device.unlockForConfiguration()
+        }
+    }
+
+    private func restoreExposureAndFocusAfterNightCapture() {
+        guard let device = activeCaptureDevice else { return }
+        do {
+            try device.lockForConfiguration()
+            if device.isFocusModeSupported(.continuousAutoFocus) {
+                device.focusMode = .continuousAutoFocus
+            }
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+            device.unlockForConfiguration()
+        } catch {
+            device.unlockForConfiguration()
+        }
+    }
+
     private func isUsingPreferredCaptureDevice(lensFacing: LensFacing, zoomLevel: Double) -> Bool {
         guard let activeCaptureDevice else { return true }
         guard lensFacing == .back else { return activeCaptureDevice.position == .front }
@@ -827,6 +1132,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
                         self.activeLensFacing = lensFacing
                         self.publishPreviewSize(profile)
                         self.isRestartingCapture = false
+                        self.startNightModeMonitoring()
                         self.capturedLensCommitTask?.cancel()
                         self.capturedLensCommitTask = Task { @MainActor in
                             try? await Task.sleep(for: .milliseconds(300))
@@ -1340,6 +1646,7 @@ final class WebRtcSessionManager: NSObject, ObservableObject, WebRtcSessionManag
         }
         applyDeviceControls(zoomLevel: activeZoomLevel)
         Self.applyExposureOnDevice(device, exposureIndex: activeExposureIndex)
+        startNightModeMonitoring()
     }
 
     private func publishPreviewSize(_ profile: WebRtcStreamProfile) {

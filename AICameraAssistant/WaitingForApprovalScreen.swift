@@ -28,6 +28,8 @@ struct WaitingForApprovalScreen: View {
     @State private var didPrewarmControllerStream = false
     @State private var isCaptureRequesting = false
     @State private var isSwitchingCameraDuringRecording = false
+    @State private var isNightHoldStillVisible = false
+    @State private var nightHoldStillTask: Task<Void, Never>?
     @State private var captureFeedback: String?
     @State private var shutterFlashVisible = false
     @State private var isBoomerangArmed = false
@@ -113,6 +115,7 @@ struct WaitingForApprovalScreen: View {
             boomerangProgressTask?.cancel()
             burstCaptureTask?.cancel()
             burstResetTask?.cancel()
+            nightHoldStillTask?.cancel()
             resetControllerSessionState()
             services.webRtcSession.stop()
         }
@@ -180,21 +183,31 @@ struct WaitingForApprovalScreen: View {
         ignoreFocusTapUntil = Date.now.addingTimeInterval(isInteracting ? 0.35 : 0.12)
     }
 
+    private var controllerNightModePreviewState: NightModeState {
+        if room?.nightModeEnabled == true {
+            return .active(.previewTreatment)
+        }
+        return .unavailable
+    }
+
     @ViewBuilder
     private func controllerPreviewContent(layout: ControllerPreviewLayout) -> some View {
         ZStack {
-            #if canImport(WebRTC)
-            if let remoteVideoTrack = services.webRtcSession.remoteVideoTrack {
-                RemoteVideoView(track: remoteVideoTrack, isMirrored: controllerPreviewLensFacing == .front)
-                    .transaction { transaction in
-                        transaction.animation = nil
-                    }
-            } else {
+            ZStack {
+                #if canImport(WebRTC)
+                if let remoteVideoTrack = services.webRtcSession.remoteVideoTrack {
+                    RemoteVideoView(track: remoteVideoTrack, isMirrored: controllerPreviewLensFacing == .front)
+                        .transaction { transaction in
+                            transaction.animation = nil
+                        }
+                } else {
+                    previewStatusOverlay
+                }
+                #else
                 previewStatusOverlay
+                #endif
             }
-            #else
-            previewStatusOverlay
-            #endif
+            .modifier(NightModePreviewTreatment(state: controllerNightModePreviewState))
 
             if room?.gridEnabled == true {
                 ControllerVideoRectOverlay(videoDrawRect: layout.videoDrawRectInVisibleRect) {
@@ -230,6 +243,13 @@ struct WaitingForApprovalScreen: View {
                         onInteractionChanged: updateFocusTapSuppression
                     )
                 }
+            }
+
+            if isNightHoldStillVisible {
+                ControllerVideoRectOverlay(videoDrawRect: layout.videoDrawRectInVisibleRect) {
+                    NightHoldStillOverlay()
+                }
+                .transition(.scale(scale: 0.92).combined(with: .opacity))
             }
 
             if let message = previewConnectionOverlayText {
@@ -1602,6 +1622,7 @@ struct WaitingForApprovalScreen: View {
             startBoomerangShutterProgress()
             captureFeedback = nil
         } else {
+            showNightHoldStillOverlayIfNeeded(for: requestType)
             captureFeedback = captureFeedbackText(for: requestType)
         }
         withAnimation(.easeOut(duration: 0.08)) {
@@ -1664,6 +1685,24 @@ struct WaitingForApprovalScreen: View {
             return "boomerang"
         }
         return "photo"
+    }
+
+    private func showNightHoldStillOverlayIfNeeded(for requestType: String) {
+        guard requestType == "photo",
+              room?.nightModeEnabled == true,
+              cameraMode == "photo" || cameraMode == "portrait" else { return }
+        nightHoldStillTask?.cancel()
+        withAnimation(.easeOut(duration: 0.16)) {
+            isNightHoldStillVisible = true
+        }
+        nightHoldStillTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(1200))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.20)) {
+                isNightHoldStillVisible = false
+            }
+            nightHoldStillTask = nil
+        }
     }
 
     private func captureFeedbackText(for requestType: String) -> String {
@@ -1846,6 +1885,9 @@ struct WaitingForApprovalScreen: View {
         controllerPreviewSwitching = false
         isCaptureRequesting = false
         isSwitchingCameraDuringRecording = false
+        isNightHoldStillVisible = false
+        nightHoldStillTask?.cancel()
+        nightHoldStillTask = nil
         isVideoRecording = false
         isVideoPaused = false
         stopRecordingTimer()

@@ -72,6 +72,53 @@ enum CameraDeviceControls {
         }
     }
 
+    nonisolated static func applyLowLightBoost(to device: AVCaptureDevice, enabled: Bool) {
+        guard device.isLowLightBoostSupported else { return }
+        do {
+            try device.lockForConfiguration()
+            device.automaticallyEnablesLowLightBoostWhenAvailable = enabled
+            device.unlockForConfiguration()
+        } catch {
+            device.unlockForConfiguration()
+        }
+    }
+
+    nonisolated static func applyExposureBias(to device: AVCaptureDevice, bias: Float) {
+        do {
+            try device.lockForConfiguration()
+            let clampedBias = min(device.maxExposureTargetBias, max(device.minExposureTargetBias, bias))
+            device.setExposureTargetBias(clampedBias, completionHandler: nil)
+            device.unlockForConfiguration()
+        } catch {
+            device.unlockForConfiguration()
+        }
+    }
+
+    nonisolated static func applyNightModePreview(to device: AVCaptureDevice, enabled: Bool, quality: Double) {
+        do {
+            try device.lockForConfiguration()
+            if device.isLowLightBoostSupported {
+                device.automaticallyEnablesLowLightBoostWhenAvailable = enabled
+            }
+            if device.isExposureModeSupported(.continuousAutoExposure) {
+                device.exposureMode = .continuousAutoExposure
+            }
+
+            let previewBias: Float
+            if enabled {
+                let normalizedQuality = min(1.0, max(0.0, quality))
+                previewBias = Float(0.45 + normalizedQuality * 0.35)
+            } else {
+                previewBias = 0
+            }
+            let clampedBias = min(device.maxExposureTargetBias, max(device.minExposureTargetBias, previewBias))
+            device.setExposureTargetBias(clampedBias, completionHandler: nil)
+            device.unlockForConfiguration()
+        } catch {
+            device.unlockForConfiguration()
+        }
+    }
+
     nonisolated static func zoomFactor(for displayZoomLevel: Double, device: AVCaptureDevice, maxZoom: CGFloat) -> CGFloat {
         let requestedZoom = max(0.5, min(8.0, displayZoomLevel))
         let mappedZoom = device.deviceType == .builtInUltraWideCamera
@@ -375,6 +422,29 @@ struct PhotoCaptureDiagnostics {
     let imageOrientation: UIImage.Orientation?
     let storedLandscape: Bool
     let portraitMask: CIImage?
+}
+
+final class BracketedPhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {
+    private let completion: ([UIImage]) -> Void
+    private var images: [UIImage] = []
+    private var didComplete = false
+
+    init(completion: @escaping ([UIImage]) -> Void) {
+        self.completion = completion
+    }
+
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        guard error == nil,
+              let data = photo.fileDataRepresentation(),
+              let image = UIImage(data: data) else { return }
+        images.append(image)
+    }
+
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings, error: Error?) {
+        guard !didComplete else { return }
+        didComplete = true
+        completion(error == nil ? images : [])
+    }
 }
 
 final class PhotoCaptureDelegate: NSObject, AVCapturePhotoCaptureDelegate {

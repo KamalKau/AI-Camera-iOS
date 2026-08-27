@@ -19,6 +19,8 @@ final class CameraController: NSObject, ObservableObject {
     @Published private(set) var lastCapturedImage: UIImage?
     @Published private(set) var lastSavedPhotoURL: URL?
     @Published private(set) var photoSaveMessage: String?
+    @Published private(set) var nightModeState: NightModeState = .unavailable
+    @Published var isNightModeEnabledByUser = true
     @Published var lensFacing: LensFacing = .back
     @Published var zoomLevel: Double = 1.0
     @Published var flashMode = "off"
@@ -32,8 +34,10 @@ final class CameraController: NSObject, ObservableObject {
     private let portraitPhotoProcessor = PortraitPhotoProcessor()
     private var isPhotoOutputPrepared = false
     private var currentInput: AVCaptureDeviceInput?
-    private var pendingPhotoDelegates: [Int64: PhotoCaptureDelegate] = [:]
+    private var pendingPhotoDelegates: [Int64: NSObject] = [:]
     private let photoSaving: any PhotoSaving
+    private let nightModeMotionMonitor = NightModeMotionMonitor()
+    private var nightModeMonitorTask: Task<Void, Never>?
     private var didPrewarmPhotoStorage = false
 
     override convenience init() {
@@ -103,6 +107,7 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     func stop() {
+        stopNightModeMonitoring()
         let session = session
         sessionQueue.async {
             if session.isRunning { session.stopRunning() }
@@ -111,6 +116,7 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     func stopAndWait() async {
+        stopNightModeMonitoring()
         let session = session
         await withCheckedContinuation { continuation in
             sessionQueue.async {
@@ -122,6 +128,7 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     func stopAndReleaseCamera() async {
+        stopNightModeMonitoring()
         let session = session
         await withCheckedContinuation { continuation in
             sessionQueue.async { [weak self] in
@@ -161,6 +168,7 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     func switchLens() {
+        nightModeState = .unavailable
         apply(lensFacing: lensFacing == .back ? .front : .back, zoomLevel: zoomLevel, flashMode: flashMode)
     }
 
@@ -181,7 +189,7 @@ final class CameraController: NSObject, ObservableObject {
     }
 
     private nonisolated static func configurePhotoOutputForSpeed(_ photoOutput: AVCapturePhotoOutput) {
-        photoOutput.maxPhotoQualityPrioritization = .speed
+        photoOutput.maxPhotoQualityPrioritization = .quality
         if photoOutput.isDepthDataDeliverySupported {
             photoOutput.isDepthDataDeliveryEnabled = false
         }
@@ -271,32 +279,145 @@ final class CameraController: NSObject, ObservableObject {
         photoSaveMessage = outcome.message
     }
 
-    func capturePhoto(aspectRatio: CameraAspectRatio = .full, portraitEffect: String? = nil, portraitStrength: Int = 5, completion: ((UIImage?) -> Void)? = nil) {
-        let selectedFlashMode = flashMode.safeCameraFlashMode
+    func capturePhoto(aspectRatio: CameraAspectRatio = .full, portraitEffect: String? = nil, portraitStrength: Int = 5, nightModeEnabled: Bool = false, completion: ((UIImage?) -> Void)? = nil) {
+        if nightModeEnabled, let plan = nightModeState.plan, lensFacing == .back {
+            captureNightModePhoto(aspectRatio: aspectRatio, plan: plan, completion: completion)
+            return
+        }
+
+        capturePhotoFrame(aspectRatio: aspectRatio, qualityPrioritization: .speed, usesFlash: true, appliesLowLightBoost: false) { [weak self] image, data, diagnostics in
+            guard let self else { return }
+            self.lastCapturedImage = image
+            completion?(image)
+            Task { @MainActor in
+                await self.saveCapturedPhoto(image, data: data, portraitEffect: portraitEffect, portraitStrength: portraitStrength, portraitMask: diagnostics.portraitMask)
+            }
+        }
+    }
+
+    private func captureNightModePhoto(aspectRatio: CameraAspectRatio, plan: NightModePlan, completion: ((UIImage?) -> Void)?) {
+        guard !nightModeState.isBusy else { return }
+        nightModeState = .capturing(plan, progress: 0)
+        photoSaveMessage = nil
+        lockExposureAndFocusForNightCapture()
+
+        Task { @MainActor in
+            let bracketFrames = await captureNightModeBracketFrames(aspectRatio: aspectRatio, plan: plan)
+            var frames = bracketFrames
+            if frames.isEmpty {
+                for index in 0..<plan.frameCount {
+                    guard !Task.isCancelled else { return }
+                    applyNightModeExposureBias(plan.exposureBias(forFrame: index))
+                    try? await Task.sleep(for: .milliseconds(90))
+                    if let frame = await captureNightModeFrame(aspectRatio: aspectRatio) {
+                        frames.append(frame)
+                    }
+                    let progress = Double(index + 1) / Double(plan.frameCount)
+                    nightModeState = .capturing(plan, progress: progress)
+                    if index < plan.frameCount - 1 {
+                        try? await Task.sleep(for: .milliseconds(Int(plan.frameInterval * 1_000)))
+                    }
+                }
+            } else {
+                nightModeState = .capturing(plan, progress: 1.0)
+            }
+
+            nightModeState = .processing(plan)
+            let processed = await Task.detached(priority: .userInitiated) {
+                await NightModePhotoProcessor().process(frames: frames, plan: plan, aspectRatio: aspectRatio)
+            }.value
+
+            if let processed {
+                lastCapturedImage = processed.image
+                completion?(processed.image)
+                await saveCapturedPhoto(processed.image, data: processed.data)
+            } else if let fallback = frames.last {
+                let data = fallback.jpegData(compressionQuality: 0.94)
+                lastCapturedImage = fallback
+                completion?(fallback)
+                await saveCapturedPhoto(fallback, data: data)
+            } else {
+                photoSaveMessage = "Night capture failed. No usable frames were captured."
+                completion?(nil)
+            }
+
+            restoreExposureAndFocusAfterNightCapture()
+            updateNightModeStateFromCurrentDevice()
+        }
+    }
+
+    private func captureNightModeBracketFrames(aspectRatio: CameraAspectRatio, plan: NightModePlan) async -> [UIImage] {
+        await withCheckedContinuation { continuation in
+            let photoOutput = photoOutput
+            let capturedLensFacing = lensFacing
+            let bracketCount = min(photoOutput.maxBracketedCapturePhotoCount, plan.frameCount)
+            guard bracketCount >= 3 else {
+                continuation.resume(returning: [])
+                return
+            }
+            let bracketedSettings = (0..<bracketCount).map {
+                AVCaptureAutoExposureBracketedStillImageSettings.autoExposureSettings(exposureTargetBias: plan.exposureBias(forFrame: $0))
+            }
+            let settings = AVCapturePhotoBracketSettings(rawPixelFormatType: 0, processedFormat: nil, bracketedSettings: bracketedSettings)
+            settings.photoQualityPrioritization = .quality
+            settings.isLensStabilizationEnabled = photoOutput.isLensStabilizationDuringBracketedCaptureSupported
+            let uniqueID = Int64(settings.uniqueID)
+            let delegate = BracketedPhotoCaptureDelegate { [weak self] images in
+                Task { @MainActor in
+                    self?.pendingPhotoDelegates[uniqueID] = nil
+                    continuation.resume(returning: images.map { $0.cropped(to: aspectRatio) })
+                }
+            }
+            pendingPhotoDelegates[uniqueID] = delegate
+            sessionQueue.async { [weak self] in
+                if let device = self?.currentInput?.device {
+                    CameraDeviceControls.applyLowLightBoost(to: device, enabled: true)
+                }
+                configurePhotoConnection(photoOutput, lensFacing: capturedLensFacing)
+                photoOutput.capturePhoto(with: settings, delegate: delegate)
+            }
+        }
+    }
+
+    private func captureNightModeFrame(aspectRatio: CameraAspectRatio) async -> UIImage? {
+        await withCheckedContinuation { continuation in
+            capturePhotoFrame(aspectRatio: aspectRatio, qualityPrioritization: .balanced, usesFlash: false, appliesLowLightBoost: true) { image, _, _ in
+                continuation.resume(returning: image)
+            }
+        }
+    }
+
+    private func capturePhotoFrame(
+        aspectRatio: CameraAspectRatio,
+        qualityPrioritization: AVCapturePhotoOutput.QualityPrioritization,
+        usesFlash: Bool,
+        appliesLowLightBoost: Bool,
+        completion: @escaping (UIImage?, Data?, PhotoCaptureDiagnostics) -> Void
+    ) {
+        let selectedFlashMode = usesFlash ? flashMode.safeCameraFlashMode : "off"
         let capturedLensFacing = lensFacing
         let photoOutput = photoOutput
         let isPrepared = isPhotoOutputPrepared
         let settings = AVCapturePhotoSettings()
-        settings.photoQualityPrioritization = .speed
-        Self.configurePortraitPhotoSettings(settings, output: photoOutput, enabled: portraitEffect != nil)
+        settings.photoQualityPrioritization = qualityPrioritization
         let uniqueID = Int64(settings.uniqueID)
         let delegate = PhotoCaptureDelegate { [weak self] image, data, diagnostics in
             Task { @MainActor in
-                let adjustedImage = image?.cropped(to: aspectRatio)
+                let sourceImage = image ?? data.flatMap(UIImage.init(data:))
+                let adjustedImage = sourceImage?.cropped(to: aspectRatio)
                 let adjustedData = aspectRatio == .full
                     ? data
                     : adjustedImage?.jpegData(compressionQuality: 0.94) ?? data
-                self?.lastCapturedImage = adjustedImage
                 self?.pendingPhotoDelegates[uniqueID] = nil
-                completion?(adjustedImage)
-                Task { @MainActor in
-                    await self?.saveCapturedPhoto(adjustedImage, data: adjustedData, portraitEffect: portraitEffect, portraitStrength: portraitStrength, portraitMask: diagnostics.portraitMask)
-                }
+                completion(adjustedImage, adjustedData, diagnostics)
             }
         }
         pendingPhotoDelegates[uniqueID] = delegate
         sessionQueue.async { [weak self] in
             let performCapture = {
+                if appliesLowLightBoost, let device = self?.currentInput?.device {
+                    CameraDeviceControls.applyLowLightBoost(to: device, enabled: true)
+                }
                 if let flashMode = selectedFlashMode.avCaptureFlashMode(supportedModes: photoOutput.supportedFlashModes, lensFacing: capturedLensFacing) {
                     settings.flashMode = flashMode
                 }
@@ -349,7 +470,10 @@ final class CameraController: NSObject, ObservableObject {
                 self.applyZoomOnQueue(selectedZoom, device: device)
                 self.applyExposureOnQueue(0, device: device)
                 if !session.isRunning { session.startRunning() }
-                Task { @MainActor in self.isRunning = session.isRunning }
+                Task { @MainActor in
+                    self.isRunning = session.isRunning
+                    self.startNightModeMonitoring()
+                }
             } catch {
                 session.commitConfiguration()
                 Task { @MainActor in self.permissionState = .denied }
@@ -400,7 +524,10 @@ final class CameraController: NSObject, ObservableObject {
                     self.applyExposureOnQueue(0, device: device)
                     if !session.isRunning { session.startRunning() }
                     let running = session.isRunning
-                    Task { @MainActor in self.isRunning = running }
+                    Task { @MainActor in
+                        self.isRunning = running
+                        self.startNightModeMonitoring()
+                    }
                     continuation.resume(returning: running)
                 } catch {
                     session.commitConfiguration()
@@ -461,6 +588,132 @@ final class CameraController: NSObject, ObservableObject {
                     Task { @MainActor in self.permissionState = .denied }
                     continuation.resume(returning: false)
                 }
+            }
+        }
+    }
+
+    private func startNightModeMonitoring() {
+        nightModeMotionMonitor.start()
+        nightModeMonitorTask?.cancel()
+        nightModeMonitorTask = Task { @MainActor in
+            while !Task.isCancelled {
+                updateNightModeStateFromCurrentDevice()
+                try? await Task.sleep(for: .milliseconds(650))
+            }
+        }
+    }
+
+    private func stopNightModeMonitoring() {
+        nightModeMonitorTask?.cancel()
+        nightModeMonitorTask = nil
+        nightModeMotionMonitor.stop()
+        nightModeState = .unavailable
+    }
+
+    private func updateNightModeStateFromCurrentDevice() {
+        guard !nightModeState.isBusy else { return }
+        let motionMagnitude = nightModeMotionMonitor.currentMagnitude()
+        let userEnabled = isNightModeEnabledByUser
+        let hasExistingNightPlan = nightModeState.plan != nil
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.currentInput?.device else { return }
+            let metrics = NightModeSceneMetrics(
+                exposureDuration: CMTimeGetSeconds(device.exposureDuration),
+                iso: device.iso,
+                exposureTargetOffset: device.exposureTargetOffset,
+                isLowLightBoostSupported: device.isLowLightBoostSupported,
+                isLowLightBoostEnabled: device.isLowLightBoostEnabled,
+                lensFacing: device.position == .front ? .front : .back,
+                deviceType: device.deviceType,
+                motionMagnitude: motionMagnitude
+            )
+            let plan = NightModePlanner.plan(for: metrics)
+            let previewEnabled = userEnabled && (plan != nil || hasExistingNightPlan) && metrics.lowLightScore >= NightModePlanner.disableThreshold * 0.55
+            CameraDeviceControls.applyNightModePreview(to: device, enabled: previewEnabled, quality: plan?.quality ?? 0)
+            Task { @MainActor in
+                self.applyNightModePlan(plan, lowLightScore: metrics.lowLightScore)
+            }
+        }
+    }
+
+    private func applyNightModePlan(_ plan: NightModePlan?, lowLightScore: Double) {
+        let clearDisableThreshold = NightModePlanner.disableThreshold * 0.55
+        switch nightModeState {
+        case .active(let currentPlan):
+            guard let plan else {
+                if lowLightScore < clearDisableThreshold {
+                    nightModeState = .unavailable
+                } else {
+                    nightModeState = isNightModeEnabledByUser ? .active(currentPlan) : .suggested(currentPlan)
+                }
+                return
+            }
+            nightModeState = isNightModeEnabledByUser ? .active(plan) : .suggested(plan)
+        case .suggested(let currentPlan):
+            guard let plan else {
+                if lowLightScore < clearDisableThreshold {
+                    nightModeState = .unavailable
+                } else {
+                    nightModeState = isNightModeEnabledByUser ? .active(currentPlan) : .suggested(currentPlan)
+                }
+                return
+            }
+            nightModeState = isNightModeEnabledByUser ? .active(plan) : .suggested(plan)
+        case .unavailable:
+            guard let plan, lowLightScore >= NightModePlanner.enableThreshold else { return }
+            nightModeState = isNightModeEnabledByUser ? .active(plan) : .suggested(plan)
+        case .capturing, .processing:
+            break
+        }
+    }
+
+    func setNightModeEnabledByUser(_ enabled: Bool) {
+        isNightModeEnabledByUser = enabled
+        updateNightModeStateFromCurrentDevice()
+    }
+
+    private func applyNightModeExposureBias(_ bias: Float) {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.currentInput?.device else { return }
+            CameraDeviceControls.applyExposureBias(to: device, bias: bias)
+        }
+    }
+
+    private func lockExposureAndFocusForNightCapture() {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.currentInput?.device else { return }
+            do {
+                try device.lockForConfiguration()
+                if device.isFocusModeSupported(.locked) {
+                    device.focusMode = .locked
+                }
+                if device.isExposureModeSupported(.locked) {
+                    device.exposureMode = .locked
+                }
+                if device.isLowLightBoostSupported {
+                    device.automaticallyEnablesLowLightBoostWhenAvailable = true
+                }
+                device.unlockForConfiguration()
+            } catch {
+                device.unlockForConfiguration()
+            }
+        }
+    }
+
+    private func restoreExposureAndFocusAfterNightCapture() {
+        sessionQueue.async { [weak self] in
+            guard let self, let device = self.currentInput?.device else { return }
+            do {
+                try device.lockForConfiguration()
+                if device.isFocusModeSupported(.continuousAutoFocus) {
+                    device.focusMode = .continuousAutoFocus
+                }
+                if device.isExposureModeSupported(.continuousAutoExposure) {
+                    device.exposureMode = .continuousAutoExposure
+                }
+                device.unlockForConfiguration()
+            } catch {
+                device.unlockForConfiguration()
             }
         }
     }

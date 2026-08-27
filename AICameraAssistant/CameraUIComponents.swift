@@ -158,6 +158,55 @@ struct CameraGridOverlay: View {
     }
 }
 
+struct NightHoldStillOverlay: View {
+    var body: some View {
+        NightCaptureProgressOverlay(durationLabel: "", progress: 0, isProcessing: false)
+    }
+}
+
+struct NightCaptureProgressOverlay: View {
+    let durationLabel: String
+    let progress: Double
+    let isProcessing: Bool
+
+    var body: some View {
+        VStack(spacing: 9) {
+            Image(systemName: "moon.stars.fill")
+                .font(.system(size: 22, weight: .bold))
+                .foregroundStyle(Color(red: 1.0, green: 0.78, blue: 0.26))
+
+            Text(isProcessing ? "Processing" : "Hold still")
+                .font(.system(size: 18, weight: .black, design: .rounded))
+                .foregroundStyle(.white)
+
+            if !durationLabel.isEmpty {
+                Text(durationLabel)
+                    .font(.system(size: 12, weight: .black).monospacedDigit())
+                    .foregroundStyle(Color(red: 1.0, green: 0.78, blue: 0.26))
+            }
+
+            ProgressView(value: min(1.0, max(0.0, progress)))
+                .progressViewStyle(.linear)
+                .tint(Color(red: 1.0, green: 0.78, blue: 0.26))
+                .frame(width: 104)
+        }
+        .padding(.horizontal, 18)
+        .padding(.vertical, 14)
+        .background(Color.black.opacity(0.64), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(.white.opacity(0.18), lineWidth: 1))
+        .shadow(color: .black.opacity(0.32), radius: 18, y: 8)
+        .allowsHitTesting(false)
+    }
+}
+
+struct NightModePreviewTreatment: ViewModifier {
+    let state: NightModeState
+
+    func body(content: Content) -> some View {
+        content
+    }
+}
+
 struct FocusReticleView: View {
     let point: CGPoint
 

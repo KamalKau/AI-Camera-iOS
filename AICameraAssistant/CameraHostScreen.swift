@@ -133,6 +133,7 @@ struct CameraHostScreen: View {
                     .id(previewLensFacing)
                 #endif
             }
+            .modifier(NightModePreviewTreatment(state: hostNightModePreviewState))
             .overlay {
                 if room?.gridEnabled == true {
                     CameraGridOverlay()
@@ -151,6 +152,18 @@ struct CameraHostScreen: View {
             .overlay {
                 if let focusReticlePoint {
                     FocusExposureOverlay(point: focusReticlePoint, exposureValue: $exposureValue)
+                }
+            }
+            .overlay {
+                switch effectiveNightModeState {
+                case .capturing(let plan, let progress):
+                    NightCaptureProgressOverlay(durationLabel: plan.durationLabel, progress: progress, isProcessing: false)
+                        .transition(.scale(scale: 0.92).combined(with: .opacity))
+                case .processing(let plan):
+                    NightCaptureProgressOverlay(durationLabel: plan.durationLabel, progress: 1.0, isProcessing: true)
+                        .transition(.scale(scale: 0.92).combined(with: .opacity))
+                case .unavailable, .suggested, .active:
+                    EmptyView()
                 }
             }
             .cameraPreviewFrame(aspectRatioMode: aspectRatioMode)
@@ -206,6 +219,21 @@ struct CameraHostScreen: View {
         }
     }
 
+    private var effectiveNightModeState: NightModeState {
+        services.webRtcSession.localVideoTrack == nil ? camera.nightModeState : services.webRtcSession.nightModeState
+    }
+
+    private var hostNightModePreviewState: NightModeState {
+        if room?.nightModeEnabled == true || effectiveNightModeState.isBusy {
+            return .active(.previewTreatment)
+        }
+        return .unavailable
+    }
+
+    private var effectiveNightModeUserEnabled: Bool {
+        services.webRtcSession.localVideoTrack == nil ? camera.isNightModeEnabledByUser : services.webRtcSession.isNightModeEnabledByUser
+    }
+
     private var hostTopOverlay: some View {
         VStack(spacing: 10) {
             ZStack(alignment: .top) {
@@ -247,23 +275,47 @@ struct CameraHostScreen: View {
                 updateAspectRatioMode(aspectRatioMode.nextCameraAspectRatioMode)
             }
 
+            if shouldShowHostNightModeControl {
+                HostRailButton(
+                    systemName: "moon.stars.fill",
+                    label: effectiveNightModeState.plan?.durationLabel ?? "Night",
+                    isSelected: room?.nightModeEnabled == true || effectiveNightModeState.isActive,
+                    selectedColor: Color(red: 1.0, green: 0.78, blue: 0.26)
+                ) {
+                    setHostNightModeEnabled(!(room?.nightModeEnabled ?? effectiveNightModeUserEnabled))
+                }
+                .transition(.scale(scale: 0.86).combined(with: .opacity))
+            }
+
             if isHostToolRailExpanded {
-                HostRailButton(systemName: "infinity", label: "Boom", isSelected: isHostBoomerangArmed) {
-                    armHostBoomerangShutter()
+                HostRailButton(
+                    systemName: camera.lensFacing == .back ? "camera.rotate" : "camera.rotate.fill",
+                    label: "Lens"
+                ) {
+                    switchHostLens()
                 }
                 .disabled(camera.boomerangCaptureManager.isBusy || services.webRtcSession.isHostVideoRecording)
+
+                HostRailButton(systemName: "plus.magnifyingglass", label: "Zoom") {
+                    cycleHostZoomLevel()
+                }
+
+                HostRailButton(systemName: "sun.max", label: "EV", isSelected: (room?.exposureIndex ?? 0) != 0) {
+                    cycleHostExposureIndex()
+                }
 
                 HostRailButton(systemName: "sparkles", label: "Scene", isSelected: room?.sceneDetectionEnabled == true) {
                     updateSceneDetectionEnabled(!(room?.sceneDetectionEnabled ?? false))
                 }
 
-                HostRailButton(systemName: "moon.stars", label: "Night", isSelected: room?.nightModeEnabled == true) {
-                    updateNightModeEnabled(!(room?.nightModeEnabled ?? false))
-                }
-
                 HostRailButton(systemName: "h.square", label: "HDR", isSelected: room?.videoHdrEnabled == true) {
                     updateVideoHdrEnabled(!(room?.videoHdrEnabled ?? false))
                 }
+
+                HostRailButton(systemName: "infinity", label: "Boom", isSelected: isHostBoomerangArmed) {
+                    armHostBoomerangShutter()
+                }
+                .disabled(camera.boomerangCaptureManager.isBusy || services.webRtcSession.isHostVideoRecording)
 
             }
 
@@ -439,7 +491,7 @@ struct CameraHostScreen: View {
             }
         }
         .buttonStyle(.plain)
-        .disabled(camera.boomerangCaptureManager.isBusy || (services.webRtcSession.isHostVideoRecording && isHostBoomerangArmed))
+        .disabled(camera.boomerangCaptureManager.isBusy || effectiveNightModeState.isBusy || (services.webRtcSession.isHostVideoRecording && isHostBoomerangArmed))
         .accessibilityLabel(hostShutterLabel)
     }
 
@@ -447,6 +499,7 @@ struct CameraHostScreen: View {
         if isHostBoomerangCaptureAnimating { return .yellow }
         if case .capturing = camera.boomerangCaptureManager.state { return .yellow }
         if isHostBoomerangArmed { return .yellow }
+        if effectiveNightModeState.isActive { return Color(red: 1.0, green: 0.78, blue: 0.26) }
         if (room?.cameraMode ?? "photo") == "video" || services.webRtcSession.isHostVideoRecording { return .red }
         if (room?.cameraMode ?? "photo") == "portrait" { return Color(red: 0.78, green: 0.62, blue: 1.0) }
         return .white.opacity(0.96)
@@ -456,6 +509,18 @@ struct CameraHostScreen: View {
         if isHostBoomerangCaptureAnimating { return "BOOM" }
         if case .capturing = camera.boomerangCaptureManager.state { return "BOOM" }
         if isHostBoomerangArmed { return "BOOM \(BoomerangCaptureDefaults.durationLabel)" }
+        switch effectiveNightModeState {
+        case .capturing:
+            return "HOLD STILL"
+        case .processing:
+            return "PROCESSING"
+        case .active(let plan):
+            return "NIGHT \(plan.durationLabel)"
+        case .suggested(let plan):
+            return "NIGHT \(plan.durationLabel)"
+        case .unavailable:
+            break
+        }
         if (room?.cameraMode ?? "photo") == "video" { return services.webRtcSession.isHostVideoRecording ? "STOP" : "VIDEO" }
         if (room?.cameraMode ?? "photo") == "portrait" { return "PORTRAIT" }
         return "PHOTO"
@@ -539,6 +604,7 @@ struct CameraHostScreen: View {
                 publishCorrectedZoomIfNeeded(appliedZoomLevel, requestedZoomLevel: nextRoom.zoomLevel)
                 syncAspectRatioModeFromRoom(nextRoom.aspectRatioMode)
                 syncToolbarExpandedFromRoom(nextRoom.toolbarExpanded)
+                syncNightModeEnabledFromRoom(nextRoom.nightModeEnabled)
                 exposureValue = Double(nextRoom.exposureIndex) / 8.0
                 prewarmHostStreamIfNeeded(for: nextRoom)
                 updateFaceDetectionPublishing(for: nextRoom)
@@ -589,8 +655,20 @@ struct CameraHostScreen: View {
             return
         }
 
+        captureSingleHostPhoto()
+    }
+
+    private func armHostBoomerangShutter() {
+        guard !camera.boomerangCaptureManager.isBusy, !services.webRtcSession.isHostVideoRecording else { return }
+        isHostBoomerangArmed.toggle()
+        boomerangStatusMessage = isHostBoomerangArmed ? "Boomerang ready" : nil
+    }
+
+    private func captureSingleHostPhoto(completion: (() -> Void)? = nil) {
+        let isNightCapture = effectiveNightModeState.isActive
         if services.webRtcSession.state != .idle {
-            services.webRtcSession.captureHostPhoto(aspectRatio: CameraAspectRatio(roomValue: aspectRatioMode), wantsPortraitMatte: false) { image, data, capturedDeviceOrientation, lensFacing, useLandscapeCanvas, _ in
+            services.webRtcSession.captureHostPhoto(aspectRatio: CameraAspectRatio(roomValue: aspectRatioMode), wantsPortraitMatte: false, nightModeEnabled: isNightCapture) { image, data, capturedDeviceOrientation, lensFacing, useLandscapeCanvas, _ in
+                completion?()
                 Task {
                     await camera.saveCapturedPhotoFromStream(
                         image,
@@ -604,14 +682,16 @@ struct CameraHostScreen: View {
                 }
             }
         } else {
-            camera.capturePhoto(aspectRatio: CameraAspectRatio(roomValue: aspectRatioMode)) { _ in }
+            camera.capturePhoto(aspectRatio: CameraAspectRatio(roomValue: aspectRatioMode), nightModeEnabled: isNightCapture) { _ in
+                completion?()
+            }
         }
     }
 
-    private func armHostBoomerangShutter() {
-        guard !camera.boomerangCaptureManager.isBusy, !services.webRtcSession.isHostVideoRecording else { return }
-        isHostBoomerangArmed.toggle()
-        boomerangStatusMessage = isHostBoomerangArmed ? "Boomerang ready" : nil
+    private var shouldShowHostNightModeControl: Bool {
+        guard !services.webRtcSession.isHostVideoRecording,
+              hostBurstCaptureTask == nil else { return false }
+        return (room?.cameraMode ?? "photo") == "photo"
     }
 
     private func scheduleHostPreviewLensFacing(_ lensFacing: LensFacing) {
@@ -670,25 +750,8 @@ struct CameraHostScreen: View {
                 isHandlingRemoteCapture = false
             default:
                 resetCaptureRequest()
-                if services.webRtcSession.state != .idle {
-                    services.webRtcSession.captureHostPhoto(aspectRatio: CameraAspectRatio(roomValue: aspectRatioMode), wantsPortraitMatte: false) { image, data, capturedDeviceOrientation, lensFacing, useLandscapeCanvas, _ in
-                        isHandlingRemoteCapture = false
-                        Task {
-                            await camera.saveCapturedPhotoFromStream(
-                                image,
-                                data: data,
-                                capturedDeviceOrientation: capturedDeviceOrientation,
-                                lensFacing: lensFacing,
-                                useLandscapeCanvas: useLandscapeCanvas,
-                                aspectRatio: CameraAspectRatio(roomValue: aspectRatioMode),
-                                saveToPhotoLibrary: false
-                            )
-                        }
-                    }
-                } else {
-                    camera.capturePhoto(aspectRatio: CameraAspectRatio(roomValue: aspectRatioMode)) { _ in
-                        isHandlingRemoteCapture = false
-                    }
+                captureSingleHostPhoto {
+                    isHandlingRemoteCapture = false
                 }
             }
         }
@@ -1026,8 +1089,53 @@ struct CameraHostScreen: View {
         Task { try? await services.roomCameraControlUpdater.updateFlashMode(roomCode: roomCode, flashMode: mode) }
     }
 
-    private func updateNightModeEnabled(_ enabled: Bool) {
+    private func cycleHostZoomLevel() {
+        let options = [0.5, 1.0, 2.0, 3.0, 5.0]
+        let currentZoom = room?.zoomLevel ?? camera.zoomLevel
+        let minZoom = room?.minZoom ?? 0.5
+        let maxZoom = room?.maxZoom ?? 8.0
+        let nextZoom = options.first { $0 > currentZoom + 0.08 && $0 >= minZoom && $0 <= maxZoom }
+            ?? options.first { $0 >= minZoom && $0 <= maxZoom }
+            ?? min(max(currentZoom, minZoom), maxZoom)
+        if var currentRoom = room {
+            currentRoom.zoomLevel = nextZoom
+            room = currentRoom
+        }
+        Task { try? await services.roomCameraControlUpdater.updateZoomLevel(roomCode: roomCode, zoomLevel: nextZoom) }
+    }
+
+    private func cycleHostExposureIndex() {
+        let options = [-4, 0, 4, 8]
+        let currentIndex = room?.exposureIndex ?? 0
+        let nextIndex = options.first { $0 > currentIndex } ?? options[0]
+        exposureValue = Double(nextIndex) / 8.0
+        if var currentRoom = room {
+            currentRoom.exposureIndex = nextIndex
+            room = currentRoom
+        }
+        Task { try? await services.roomCameraControlUpdater.updateExposureIndex(roomCode: roomCode, exposureIndex: nextIndex) }
+    }
+
+    private func setHostNightModeEnabled(_ enabled: Bool) {
+        if var currentRoom = room {
+            currentRoom.nightModeEnabled = enabled
+            room = currentRoom
+        }
+        syncNightModeEnabledFromRoom(enabled)
         Task { try? await services.roomCameraControlUpdater.updateNightModeEnabled(roomCode: roomCode, nightModeEnabled: enabled) }
+    }
+
+    private func syncNightModeEnabledFromRoom(_ enabled: Bool) {
+        if camera.isNightModeEnabledByUser != enabled {
+            camera.setNightModeEnabledByUser(enabled)
+        }
+        if services.webRtcSession.isNightModeEnabledByUser != enabled {
+            services.webRtcSession.setNightModeEnabledByUser(enabled)
+        }
+    }
+
+    private func updateNightModeEnabled(_ enabled: Bool) {
+        setHostNightModeEnabled(enabled)
     }
 
     private func updateVideoHdrEnabled(_ enabled: Bool) {
@@ -1347,6 +1455,7 @@ private struct HostRailButton: View {
     let label: String
     var role: ButtonRole?
     var isSelected = false
+    var selectedColor = Color.white
     let action: () -> Void
 
     var body: some View {
@@ -1356,7 +1465,7 @@ private struct HostRailButton: View {
                     .font(.system(size: 14, weight: .semibold))
                     .frame(width: 34, height: 34)
                     .foregroundStyle(isSelected ? .black : .white)
-                    .background(isSelected ? Color.white : Color.white.opacity(0.11), in: Circle())
+                    .background(isSelected ? selectedColor : Color.white.opacity(0.11), in: Circle())
                     .overlay(Circle().stroke(.white.opacity(0.16), lineWidth: 1))
                 Text(label)
                     .font(.system(size: 8, weight: .bold))
