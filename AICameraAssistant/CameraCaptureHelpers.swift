@@ -40,6 +40,15 @@ enum CameraAspectRatio: String, CaseIterable, Sendable {
 }
 
 enum CameraDeviceControls {
+    private struct NightModePreviewDeviceState: Equatable {
+        let enabled: Bool
+        let qualityBucket: Int
+        let exposureIndex: Int
+    }
+
+    private nonisolated(unsafe) static var nightModePreviewStateByDeviceID: [ObjectIdentifier: NightModePreviewDeviceState] = [:]
+    private static let nightModePreviewStateLock = NSLock()
+
     nonisolated static func applyZoom(to device: AVCaptureDevice, zoomLevel: Double) {
         do {
             try device.lockForConfiguration()
@@ -89,33 +98,53 @@ enum CameraDeviceControls {
             let clampedBias = min(device.maxExposureTargetBias, max(device.minExposureTargetBias, bias))
             device.setExposureTargetBias(clampedBias, completionHandler: nil)
             device.unlockForConfiguration()
+            clearNightModePreviewState(for: device)
         } catch {
             device.unlockForConfiguration()
         }
     }
 
+    private nonisolated static func clearNightModePreviewState(for device: AVCaptureDevice) {
+        nightModePreviewStateLock.lock()
+        nightModePreviewStateByDeviceID[ObjectIdentifier(device)] = nil
+        nightModePreviewStateLock.unlock()
+    }
+
     nonisolated static func applyNightModePreview(to device: AVCaptureDevice, enabled: Bool, quality: Double, exposureIndex: Int) {
+        let clampedExposureIndex = min(8, max(-8, exposureIndex))
+        let qualityBucket = Int((min(1.0, max(0.0, quality)) * 4.0).rounded())
+        let nextState = NightModePreviewDeviceState(enabled: enabled, qualityBucket: qualityBucket, exposureIndex: clampedExposureIndex)
+        let deviceID = ObjectIdentifier(device)
+
+        nightModePreviewStateLock.lock()
+        if nightModePreviewStateByDeviceID[deviceID] == nextState {
+            nightModePreviewStateLock.unlock()
+            return
+        }
+        nightModePreviewStateByDeviceID[deviceID] = nextState
+        nightModePreviewStateLock.unlock()
+
         do {
             try device.lockForConfiguration()
-            if device.isLowLightBoostSupported {
+            if device.isLowLightBoostSupported, device.automaticallyEnablesLowLightBoostWhenAvailable != enabled {
                 device.automaticallyEnablesLowLightBoostWhenAvailable = enabled
             }
-            if device.isExposureModeSupported(.continuousAutoExposure) {
+            if device.isExposureModeSupported(.continuousAutoExposure), device.exposureMode != .continuousAutoExposure {
                 device.exposureMode = .continuousAutoExposure
             }
 
-            let userBias = Float(min(8, max(-8, exposureIndex))) / 2.0
-            let previewBias: Float
-            if enabled {
-                let normalizedQuality = min(1.0, max(0.0, quality))
-                previewBias = userBias + Float(0.35 + normalizedQuality * 0.25)
-            } else {
-                previewBias = userBias
-            }
+            let userBias = Float(clampedExposureIndex) / 2.0
+            let nightPreviewLift = enabled ? Float(0.30 + (Double(qualityBucket) / 4.0) * 0.18) : 0
+            let previewBias = userBias + nightPreviewLift
             let clampedBias = min(device.maxExposureTargetBias, max(device.minExposureTargetBias, previewBias))
-            device.setExposureTargetBias(clampedBias, completionHandler: nil)
+            if abs(device.exposureTargetBias - clampedBias) > 0.05 {
+                device.setExposureTargetBias(clampedBias, completionHandler: nil)
+            }
             device.unlockForConfiguration()
         } catch {
+            nightModePreviewStateLock.lock()
+            nightModePreviewStateByDeviceID[deviceID] = nil
+            nightModePreviewStateLock.unlock()
             device.unlockForConfiguration()
         }
     }
